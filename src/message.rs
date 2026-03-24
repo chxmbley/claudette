@@ -24,6 +24,9 @@ pub enum DividerDrag {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// No-op message for async task callbacks that don't need to trigger updates.
+    Noop,
+
     // Sidebar
     ToggleSidebar,
     SelectWorkspace(String),
@@ -120,6 +123,8 @@ pub enum Message {
     // --- Chat ---
     ChatInputChanged(String),
     ChatSend,
+    ChatHistoryUp,
+    ChatHistoryDown,
     ChatMessageSaved(Result<ChatMessage, String>),
     ChatHistoryLoaded(String, Result<Vec<ChatMessage>, String>), // ws_id, result
 
