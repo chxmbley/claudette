@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use iced::widget::{Column, Space, center, column, container, markdown, text};
 use iced::{Element, Fill};
 use iced_term::Terminal;
 
+use crate::app::ToolActivity;
 use crate::message::{DividerDrag, Message};
 use crate::model::diff::{DiffFile, DiffViewMode, FileDiff};
 use crate::model::{AgentStatus, ChatMessage, Repository, TerminalTab, Workspace};
@@ -18,6 +20,8 @@ pub fn view_main_content<'a>(
     chat_input: &str,
     streaming_text: &'a str,
     markdown_items: &'a [Vec<markdown::Item>],
+    turn_elapsed: Option<Duration>,
+    tool_activities: &'a [ToolActivity],
     // Diff state
     diff_files: &'a [DiffFile],
     diff_selected_file: Option<&'a str>,
@@ -54,6 +58,8 @@ pub fn view_main_content<'a>(
                     streaming_text,
                     markdown_items,
                     is_running,
+                    turn_elapsed,
+                    tool_activities,
                 )
             };
 

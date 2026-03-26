@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -38,6 +38,12 @@ pub enum StreamEvent {
         #[serde(default)]
         duration_ms: Option<i64>,
     },
+
+    #[serde(rename = "user")]
+    User { message: UserEventMessage },
+
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,13 +53,20 @@ pub enum InnerStreamEvent {
     MessageStart {},
 
     #[serde(rename = "content_block_start")]
-    ContentBlockStart { index: usize },
+    ContentBlockStart {
+        index: usize,
+        #[serde(default)]
+        content_block: Option<StartContentBlock>,
+    },
 
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: Delta },
 
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
+
+    #[serde(rename = "message_delta")]
+    MessageDelta {},
 
     #[serde(rename = "message_stop")]
     MessageStop {},
@@ -72,6 +85,48 @@ pub enum Delta {
     ToolUse {
         #[serde(default)]
         partial_json: Option<String>,
+    },
+
+    #[serde(rename = "input_json_delta")]
+    InputJson {
+        #[serde(default)]
+        partial_json: Option<String>,
+    },
+
+    #[serde(other)]
+    Unknown,
+}
+
+/// Content block info from `content_block_start` events.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum StartContentBlock {
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+
+    #[serde(rename = "text")]
+    Text {},
+
+    #[serde(other)]
+    Unknown,
+}
+
+/// Message payload from `user` type events (tool results fed back to the model).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserEventMessage {
+    #[serde(default)]
+    pub content: Vec<UserContentBlock>,
+}
+
+/// Content block within a `user` event message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum UserContentBlock {
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
     },
 
     #[serde(other)]
@@ -102,34 +157,63 @@ pub fn parse_stream_line(line: &str) -> Result<StreamEvent, serde_json::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Agent process manager
+// Agent events — wrapper for all events from a turn
 // ---------------------------------------------------------------------------
 
-/// Result of spawning an agent process — individual parts for flexible storage.
-pub struct SpawnedAgent {
-    pub stdin_tx: mpsc::Sender<String>,
-    pub event_rx: mpsc::Receiver<StreamEvent>,
-    pub session_id: String,
+/// Events emitted by an agent turn (stream events + process lifecycle).
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    /// A parsed stream event from stdout.
+    Stream(StreamEvent),
+    /// The agent process has exited.
+    ProcessExited(Option<i32>),
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn agent process
+// ---------------------------------------------------------------------------
+
+/// Handle for an active agent turn — holds the event receiver and process ID.
+pub struct TurnHandle {
+    pub event_rx: mpsc::Receiver<AgentEvent>,
     pub pid: u32,
 }
 
-/// Spawn a Claude Code CLI process with bidirectional JSON streaming.
-pub async fn spawn_agent(working_dir: &Path, session_id: &str) -> Result<SpawnedAgent, String> {
+/// Run a single agent turn by spawning `claude -p` with the given prompt.
+///
+/// For the first turn, uses `--session-id` to establish the session.
+/// For subsequent turns, uses `--resume` to continue the conversation.
+pub async fn run_turn(
+    working_dir: &Path,
+    session_id: &str,
+    prompt: &str,
+    is_resume: bool,
+) -> Result<TurnHandle, String> {
+    let mut args = vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
+    ];
+
+    if is_resume {
+        args.push("--resume".to_string());
+        args.push(session_id.to_string());
+    } else {
+        args.push("--session-id".to_string());
+        args.push(session_id.to_string());
+    }
+
+    // Prompt as positional argument
+    args.push(prompt.to_string());
+
     let mut child = Command::new("claude")
-        .args([
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--input-format",
-            "stream-json",
-            "--verbose",
-            "--session-id",
-            session_id,
-        ])
+        .args(&args)
         .current_dir(working_dir)
-        .stdin(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn claude: {e}"))?;
 
@@ -137,34 +221,19 @@ pub async fn spawn_agent(working_dir: &Path, session_id: &str) -> Result<Spawned
         .id()
         .ok_or_else(|| "Process exited immediately".to_string())?;
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to capture stdin".to_string())?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "Failed to capture stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture stderr".to_string())?;
 
-    // Stdin writer task
-    let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(32);
-    tokio::spawn(async move {
-        let mut stdin = stdin;
-        while let Some(msg) = stdin_rx.recv().await {
-            if stdin.write_all(msg.as_bytes()).await.is_err() {
-                break;
-            }
-            if stdin.write_all(b"\n").await.is_err() {
-                break;
-            }
-            if stdin.flush().await.is_err() {
-                break;
-            }
-        }
-    });
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(128);
 
-    // Stdout reader task
-    let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(128);
+    // Stdout reader task — parse stream-json events
+    let tx_stdout = event_tx.clone();
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -174,7 +243,7 @@ pub async fn spawn_agent(working_dir: &Path, session_id: &str) -> Result<Spawned
             }
             match parse_stream_line(&line) {
                 Ok(event) => {
-                    if event_tx.send(event).await.is_err() {
+                    if tx_stdout.send(AgentEvent::Stream(event)).await.is_err() {
                         break;
                     }
                 }
@@ -185,34 +254,25 @@ pub async fn spawn_agent(working_dir: &Path, session_id: &str) -> Result<Spawned
         }
     });
 
-    // Wait for process exit in background, let the event channel close naturally
+    // Stderr reader task — log stderr lines
     tokio::spawn(async move {
-        let _ = child.wait().await;
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.trim().is_empty() {
+                eprintln!("[agent stderr] {line}");
+            }
+        }
     });
 
-    Ok(SpawnedAgent {
-        stdin_tx,
-        event_rx,
-        session_id: session_id.to_string(),
-        pid,
-    })
-}
+    // Process exit watcher — sends ProcessExited when the child terminates
+    let tx_exit = event_tx;
+    tokio::spawn(async move {
+        let status = child.wait().await.ok().and_then(|s| s.code());
+        let _ = tx_exit.send(AgentEvent::ProcessExited(status)).await;
+    });
 
-/// Send a user message to the agent via its stdin channel.
-pub async fn send_user_message(
-    stdin_tx: &mpsc::Sender<String>,
-    content: &str,
-) -> Result<(), String> {
-    let msg = serde_json::json!({
-        "type": "user",
-        "content": content,
-    })
-    .to_string();
-
-    stdin_tx
-        .send(msg)
-        .await
-        .map_err(|e| format!("Failed to send message: {e}"))
+    Ok(TurnHandle { event_rx, pid })
 }
 
 /// Stop an agent process by killing it.
@@ -298,12 +358,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_message_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{}}}"#;
+        let event = parse_stream_line(line).unwrap();
+        match event {
+            StreamEvent::Stream { event } => {
+                assert!(matches!(event, InnerStreamEvent::MessageDelta {}));
+            }
+            _ => panic!("Expected Stream event"),
+        }
+    }
+
+    #[test]
     fn test_parse_content_block_start() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0}}"#;
         let event = parse_stream_line(line).unwrap();
         match event {
             StreamEvent::Stream { event } => match event {
-                InnerStreamEvent::ContentBlockStart { index } => assert_eq!(index, 0),
+                InnerStreamEvent::ContentBlockStart { index, .. } => assert_eq!(index, 0),
                 _ => panic!("Expected ContentBlockStart"),
             },
             _ => panic!("Expected Stream event"),
@@ -457,8 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_delta_type() {
+    fn test_parse_input_json_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}}"#;
+        let event = parse_stream_line(line).unwrap();
+        match event {
+            StreamEvent::Stream { event } => match event {
+                InnerStreamEvent::ContentBlockDelta { delta, .. } => {
+                    assert!(matches!(
+                        delta,
+                        Delta::InputJson {
+                            partial_json: Some(_)
+                        }
+                    ));
+                }
+                _ => panic!("Expected ContentBlockDelta"),
+            },
+            _ => panic!("Expected Stream event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_delta_type() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"some_future_delta","data":123}}}"#;
         let event = parse_stream_line(line).unwrap();
         match event {
             StreamEvent::Stream { event } => match event {
@@ -488,6 +580,28 @@ mod tests {
     fn test_parse_invalid_json_returns_error() {
         let result = parse_stream_line("not json at all");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_user_event_with_tool_result() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_01","content":"ok"}]}}"#;
+        let event = parse_stream_line(line).unwrap();
+        match event {
+            StreamEvent::User { message } => {
+                assert_eq!(message.content.len(), 1);
+                match &message.content[0] {
+                    UserContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                    } => {
+                        assert_eq!(tool_use_id, "tu_01");
+                        assert_eq!(content.as_str().unwrap(), "ok");
+                    }
+                    _ => panic!("Expected ToolResult"),
+                }
+            }
+            _ => panic!("Expected User event"),
+        }
     }
 
     #[test]
