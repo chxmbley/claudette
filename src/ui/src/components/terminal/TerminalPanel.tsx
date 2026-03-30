@@ -32,6 +32,7 @@ export function TerminalPanel() {
   const setActiveTerminalTab = useAppStore((s) => s.setActiveTerminalTab);
   const toggleTerminalPanel = useAppStore((s) => s.toggleTerminalPanel);
 
+  const autoCreatedRef = useRef<string | null>(null);
   const termRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -42,19 +43,30 @@ export function TerminalPanel() {
     ? terminalTabs[selectedWorkspaceId] || []
     : [];
 
-  // Load terminal tabs on workspace change
+  // Load terminal tabs on workspace change; auto-create one if none exist.
   useEffect(() => {
     if (!selectedWorkspaceId) return;
-    listTerminalTabs(selectedWorkspaceId).then((t) => {
-      setTerminalTabs(selectedWorkspaceId, t);
-      if (t.length > 0 && !activeTerminalTabId) {
-        setActiveTerminalTab(t[0].id);
+    listTerminalTabs(selectedWorkspaceId).then(async (t) => {
+      if (t.length > 0) {
+        setTerminalTabs(selectedWorkspaceId, t);
+        if (!activeTerminalTabId) {
+          setActiveTerminalTab(t[0].id);
+        }
+      } else if (autoCreatedRef.current !== selectedWorkspaceId) {
+        autoCreatedRef.current = selectedWorkspaceId;
+        try {
+          const tab = await createTerminalTab(selectedWorkspaceId);
+          addTerminalTab(selectedWorkspaceId, tab);
+        } catch {
+          autoCreatedRef.current = null;
+        }
       }
     });
   }, [
     selectedWorkspaceId,
     setTerminalTabs,
     setActiveTerminalTab,
+    addTerminalTab,
     activeTerminalTabId,
   ]);
 
