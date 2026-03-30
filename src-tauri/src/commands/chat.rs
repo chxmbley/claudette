@@ -1,9 +1,9 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use claudette_core::agent::{self, AgentEvent, StreamEvent};
-use claudette_core::db::Database;
-use claudette_core::model::{ChatMessage, ChatRole};
+use claudette::agent::{self, AgentEvent, StreamEvent};
+use claudette::db::Database;
+use claudette::model::{ChatMessage, ChatRole};
 
 use crate::state::{AgentSessionState, AppState};
 
@@ -11,6 +11,40 @@ use crate::state::{AgentSessionState, AppState};
 struct AgentStreamPayload {
     workspace_id: String,
     event: AgentEvent,
+}
+
+const TOOLS_FULL: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch",
+    "NotebookEdit",
+];
+
+const TOOLS_STANDARD: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch",
+];
+
+const TOOLS_READONLY: &[&str] = &["Read", "Glob", "Grep", "WebSearch", "WebFetch"];
+
+/// Map a permission level name to the list of tools to pre-approve.
+fn tools_for_level(level: &str) -> Vec<String> {
+    let tools: &[&str] = match level {
+        "full" => TOOLS_FULL,
+        "standard" => TOOLS_STANDARD,
+        _ => TOOLS_READONLY,
+    };
+    tools.iter().map(|s| (*s).to_string()).collect()
 }
 
 #[tauri::command]
@@ -27,6 +61,7 @@ pub async fn load_chat_history(
 pub async fn send_chat_message(
     workspace_id: String,
     content: String,
+    permission_level: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -57,6 +92,13 @@ pub async fn send_chat_message(
     db.insert_chat_message(&user_msg)
         .map_err(|e| e.to_string())?;
 
+    // Resolve allowed tools from permission level.
+    let level = permission_level.as_deref().unwrap_or("full");
+    if !matches!(level, "readonly" | "standard" | "full") {
+        eprintln!("[chat] Unknown permission level {level:?}, falling back to readonly");
+    }
+    let allowed_tools = tools_for_level(level);
+
     // Get or create agent session.
     let mut agents = state.agents.write().await;
     let session = agents
@@ -77,6 +119,7 @@ pub async fn send_chat_message(
         &session_id,
         &content,
         is_resume,
+        &allowed_tools,
     )
     .await?;
 
@@ -95,7 +138,7 @@ pub async fn send_chat_message(
                     .content
                     .iter()
                     .filter_map(|block| {
-                        if let claudette_core::agent::ContentBlock::Text { text } = block {
+                        if let claudette::agent::ContentBlock::Text { text } = block {
                             Some(text.as_str())
                         } else {
                             None

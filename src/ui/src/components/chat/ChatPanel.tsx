@@ -6,6 +6,8 @@ import {
   loadChatHistory,
   sendChatMessage,
   stopAgent,
+  getAppSetting,
+  setAppSetting,
 } from "../../services/tauri";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import styles from "./ChatPanel.module.css";
@@ -46,7 +48,32 @@ export function ChatPanel() {
   const activities = selectedWorkspaceId
     ? toolActivities[selectedWorkspaceId] || []
     : [];
+  const permissionLevel = useAppStore((s) =>
+    selectedWorkspaceId
+      ? s.permissionLevel[selectedWorkspaceId] || "full"
+      : "readonly"
+  );
+  const setPermissionLevel = useAppStore((s) => s.setPermissionLevel);
   const isRunning = ws?.agent_status === "Running";
+
+  // Load persisted permission level when workspace changes.
+  useEffect(() => {
+    if (!selectedWorkspaceId) return;
+    let cancelled = false;
+    getAppSetting(`permission_level:${selectedWorkspaceId}`)
+      .then((val) => {
+        if (cancelled) return;
+        if (val === "readonly" || val === "standard" || val === "full") {
+          setPermissionLevel(selectedWorkspaceId, val);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load permission level:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWorkspaceId, setPermissionLevel]);
 
   // Load chat history when workspace changes, seed prompt history from it.
   useEffect(() => {
@@ -96,7 +123,7 @@ export function ChatPanel() {
     updateWorkspace(selectedWorkspaceId, { agent_status: "Running" });
 
     try {
-      await sendChatMessage(selectedWorkspaceId, content);
+      await sendChatMessage(selectedWorkspaceId, content, permissionLevel);
     } catch (e) {
       const errMsg = String(e);
       console.error("sendChatMessage failed:", errMsg);
@@ -169,6 +196,32 @@ export function ChatPanel() {
           {repo && <span className={styles.repoName}>{repo.name}</span>}
         </div>
         <div className={styles.headerRight}>
+          <select
+            className={styles.permissionSelect}
+            value={permissionLevel}
+            onChange={async (e) => {
+              if (!selectedWorkspaceId) return;
+              const previous = permissionLevel;
+              const level = e.target.value as "readonly" | "standard" | "full";
+              setPermissionLevel(selectedWorkspaceId, level);
+              try {
+                await setAppSetting(
+                  `permission_level:${selectedWorkspaceId}`,
+                  level
+                );
+              } catch (err) {
+                console.error("Failed to persist permission level:", err);
+                setPermissionLevel(selectedWorkspaceId, previous);
+              }
+            }}
+            disabled={isRunning}
+            title="Tool permission level for this workspace"
+            aria-label="Tool permission level for this workspace"
+          >
+            <option value="readonly">Read-only</option>
+            <option value="standard">Standard</option>
+            <option value="full">Full access</option>
+          </select>
           <span
             className={styles.statusBadge}
             style={{ color: agentStatusColor }}
