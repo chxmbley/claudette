@@ -18,6 +18,7 @@ export interface InitialData {
   repositories: Repository[];
   workspaces: Workspace[];
   worktree_base_dir: string;
+  default_branches: Record<string, string>;
 }
 
 export function loadInitialData(): Promise<InitialData> {
@@ -49,6 +50,10 @@ export function removeRepository(id: string): Promise<void> {
 
 export function getRepoConfig(repoId: string): Promise<RepoConfigInfo> {
   return invoke("get_repo_config", { repoId });
+}
+
+export function getDefaultBranch(repoId: string): Promise<string | null> {
+  return invoke("get_default_branch", { repoId });
 }
 
 // -- Workspace --
