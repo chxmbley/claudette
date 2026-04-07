@@ -36,6 +36,14 @@ pub struct GeneratedName {
     pub easter_egg: Option<EasterEgg>,
 }
 
+impl GeneratedName {
+    /// Branch-safe name: always "{adjective}-{plant}".
+    /// Safe because ADJECTIVES and PLANTS word lists are lowercase ASCII only.
+    pub fn slug(&self) -> String {
+        format!("{}-{}", self.adjective, self.plant)
+    }
+}
+
 impl NameGenerator {
     pub fn new() -> Self {
         let mut this = Self {
@@ -214,6 +222,13 @@ mod tests {
         let name = namer.generate();
         assert!(!name.display.is_empty());
         assert!(name.display.contains('-') || name.easter_egg.is_some());
+        // slug is always branch-safe regardless of easter eggs
+        assert!(name.slug().contains('-'));
+        assert!(
+            name.slug()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        );
     }
 
     #[test]
@@ -261,5 +276,14 @@ mod tests {
         let namer = NameGenerator::new();
         let name = namer.build_name("calm", "daisy");
         assert!(name.easter_egg.is_none());
+    }
+
+    #[test]
+    fn slug_is_safe_even_for_easter_eggs() {
+        let namer = NameGenerator::new();
+        let name = namer.build_name("wild", "fern");
+        assert_eq!(name.slug(), "wild-fern");
+        // display has the fun emoji version
+        assert!(name.display.contains('\u{1f33f}'));
     }
 }
