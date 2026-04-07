@@ -8,6 +8,7 @@ import {
   connectRemote,
   disconnectRemote,
   removeRemoteConnection,
+  sendRemoteCommand,
   pairWithServer,
   startLocalServer,
 } from "../../services/tauri";
@@ -452,8 +453,10 @@ function RemoteConnectionGroup({
   const workspaces = useAppStore((s) => s.workspaces);
   const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId);
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
+  const addWorkspace = useAppStore((s) => s.addWorkspace);
   const repoCollapsed = useAppStore((s) => s.repoCollapsed);
   const toggleRepoCollapsed = useAppStore((s) => s.toggleRepoCollapsed);
+  const creatingRef = useRef<Set<string>>(new Set());
 
   const remoteRepos = repositories.filter(
     (r) => r.remote_connection_id === conn.id
@@ -461,6 +464,31 @@ function RemoteConnectionGroup({
   const remoteWorkspaces = workspaces.filter(
     (w) => w.remote_connection_id === conn.id
   );
+
+  const handleCreateWorkspace = async (repoId: string) => {
+    if (creatingRef.current.has(repoId)) return;
+    creatingRef.current.add(repoId);
+    try {
+      const name = await generateWorkspaceName();
+      const result = await sendRemoteCommand(conn.id, "create_workspace", {
+        repository_id: repoId,
+        name,
+      });
+      if (result === null || typeof result !== "object" || !("id" in result)) {
+        throw new Error("Remote server returned an invalid workspace");
+      }
+      const ws: import("../../types/workspace").Workspace = {
+        ...(result as Omit<import("../../types/workspace").Workspace, "remote_connection_id">),
+        remote_connection_id: conn.id,
+      };
+      addWorkspace(ws);
+      selectWorkspace(ws.id);
+    } catch (e) {
+      console.error("Failed to create remote workspace:", e);
+    } finally {
+      creatingRef.current.delete(repoId);
+    }
+  };
 
   return (
     <div className={styles.repoGroup}>
@@ -531,6 +559,16 @@ function RemoteConnectionGroup({
                     <span className={styles.runningBadge}>{runningCount}</span>
                   )}
                 </span>
+                <button
+                  className={styles.iconBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleCreateWorkspace(repo.id);
+                  }}
+                  title="New workspace"
+                >
+                  +
+                </button>
               </div>
               {!collapsed &&
                 repoWs.map((ws) => (
