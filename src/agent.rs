@@ -404,6 +404,111 @@ pub async fn stop_agent(pid: u32) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Branch name generation via Haiku
+// ---------------------------------------------------------------------------
+
+/// Sanitize a string into a valid git branch slug: lowercase ASCII
+/// alphanumeric + hyphens, no leading/trailing hyphens, max `max_len` chars.
+pub fn sanitize_branch_name(raw: &str, max_len: usize) -> String {
+    let slug: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Collapse consecutive hyphens.
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_hyphen = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                collapsed.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            collapsed.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    // Trim leading/trailing hyphens, truncate.
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.len() <= max_len {
+        return trimmed.to_string();
+    }
+    // Truncate at `max_len` and drop any trailing hyphens introduced by the cut.
+    let truncated = &trimmed[..max_len];
+    truncated.trim_end_matches('-').to_string()
+}
+
+/// Call Claude Haiku to generate a short branch name slug from the user's
+/// first prompt. Returns a sanitized branch slug (e.g. `fix-login-timeout`).
+/// `worktree_path` sets the subprocess CWD so the CLI picks up the correct
+/// project context (CLAUDE.md) for the user's workspace — not Claudette's own.
+pub async fn generate_branch_name(
+    prompt_text: &str,
+    worktree_path: &str,
+) -> Result<String, String> {
+    // Truncate prompt to keep the Haiku call fast and cheap.
+    let truncated: String = prompt_text.chars().take(200).collect();
+
+    let mut cmd = Command::new("claude");
+    cmd.stdin(std::process::Stdio::null());
+    // Run in the user's worktree so the CLI loads *their* project context.
+    cmd.current_dir(worktree_path);
+    let user_message = format!(
+        "Generate a short git branch name slug for the following task. \
+         Output ONLY the slug — no explanation, no markdown, no quotes. \
+         Lowercase letters, numbers, and hyphens only. Max 30 chars.\n\n\
+         Task: {truncated}"
+    );
+    cmd.args([
+        "--print",
+        "--output-format",
+        "text",
+        "--model",
+        "claude-haiku-4-5",
+        "--append-system-prompt",
+        "You are a branch name generator. Output ONLY a slug. Never answer the task itself.",
+        &user_message,
+    ]);
+
+    // Strip env vars that interfere with subprocess auth — same as run_turn.
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+        && !key.starts_with("sk-ant-api")
+    {
+        cmd.env_remove("ANTHROPIC_API_KEY");
+    }
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn claude for branch name: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Haiku branch name call failed: {stderr}"));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let slug = sanitize_branch_name(&raw, 30);
+    if slug.is_empty() {
+        return Err(format!(
+            "Haiku returned empty or unsanitizable output: {raw:?}"
+        ));
+    }
+    Ok(slug)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -963,5 +1068,67 @@ mod tests {
         assert_eq!(args[pm_idx + 1], "plan");
         // Even with plan_mode, bypass tools should NOT pass --allowedTools
         assert!(!args.contains(&"--allowedTools".to_string()));
+    }
+
+    // --- Branch name sanitization tests ---
+
+    #[test]
+    fn test_sanitize_simple_slug() {
+        assert_eq!(sanitize_branch_name("fix-login-bug", 40), "fix-login-bug");
+    }
+
+    #[test]
+    fn test_sanitize_uppercase_and_spaces() {
+        assert_eq!(
+            sanitize_branch_name("Fix Login Timeout", 40),
+            "fix-login-timeout"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_special_characters() {
+        assert_eq!(
+            sanitize_branch_name("add CSV export!!", 40),
+            "add-csv-export"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_consecutive_hyphens() {
+        assert_eq!(
+            sanitize_branch_name("fix---multiple---hyphens", 40),
+            "fix-multiple-hyphens"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_leading_trailing_hyphens() {
+        assert_eq!(
+            sanitize_branch_name("--leading-and-trailing--", 40),
+            "leading-and-trailing"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_truncation() {
+        let long_input = "this-is-a-very-long-branch-name-that-exceeds-the-limit";
+        let result = sanitize_branch_name(long_input, 20);
+        assert!(result.len() <= 20);
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn test_sanitize_empty_input() {
+        assert_eq!(sanitize_branch_name("", 40), "");
+    }
+
+    #[test]
+    fn test_sanitize_all_special_chars() {
+        assert_eq!(sanitize_branch_name("!@#$%", 40), "");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_numbers() {
+        assert_eq!(sanitize_branch_name("fix-issue-42", 40), "fix-issue-42");
     }
 }
