@@ -1,8 +1,10 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "./stores/useAppStore";
 import { loadInitialData, getAppSetting, listRemoteConnections, listDiscoveredServers, getLocalServerStatus } from "./services/tauri";
 import { applyTheme, loadAllThemes, findTheme } from "./utils/theme";
 import { AppLayout } from "./components/layout/AppLayout";
+import type { CommandEvent } from "./types";
 import "./styles/theme.css";
 
 function App() {
@@ -77,8 +79,67 @@ function App() {
       })
       .catch((err) => console.error("Failed to load local server status:", err));
 
+    // Listen for terminal command events
+    const setupCommandListeners = async () => {
+      const unlistenCommandDetected = await listen<CommandEvent>("pty-command-detected", (event) => {
+        const { pty_id, command } = event.payload;
+
+        // Find the workspace that owns this PTY - use getState() to avoid stale closure
+        const { terminalTabs, setWorkspaceTerminalCommand } = useAppStore.getState();
+        for (const [wsId, tabs] of Object.entries(terminalTabs)) {
+          const tab = tabs.find((t) => t.pty_id === pty_id);
+          if (tab) {
+            setWorkspaceTerminalCommand(wsId, {
+              command: command || null,
+              isRunning: true,
+              exitCode: null,
+            });
+            break;
+          }
+        }
+      });
+
+      const unlistenCommandStopped = await listen<CommandEvent>("pty-command-stopped", (event) => {
+        const { pty_id, command, exit_code } = event.payload;
+
+        // Find the workspace that owns this PTY - use getState() to avoid stale closure
+        const { terminalTabs, setWorkspaceTerminalCommand } = useAppStore.getState();
+        for (const [wsId, tabs] of Object.entries(terminalTabs)) {
+          const tab = tabs.find((t) => t.pty_id === pty_id);
+          if (tab) {
+            setWorkspaceTerminalCommand(wsId, {
+              command: command || null,
+              isRunning: false,
+              exitCode: exit_code !== null && exit_code !== undefined ? exit_code : null,
+            });
+            break;
+          }
+        }
+      });
+
+      return () => {
+        unlistenCommandDetected();
+        unlistenCommandStopped();
+      };
+    };
+
+    let isActive = true;
+    const unlistenCommandEventsPromise = setupCommandListeners();
+
+    // If the promise resolves after cleanup, call unlisten immediately
+    unlistenCommandEventsPromise.then((unlisten) => {
+      if (!isActive) {
+        unlisten();
+      }
+    });
+
     return () => {
+      isActive = false;
       window.clearInterval(discoveredServersPollId);
+      // Clean up listeners when they're ready
+      void unlistenCommandEventsPromise.then((unlisten) => {
+        unlisten();
+      });
     };
   }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId]);
 
