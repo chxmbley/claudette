@@ -36,6 +36,8 @@ import { FileMentionPicker, matchFiles } from "./FileMentionPicker";
 import { checkpointHasFileChanges, clearAllHasFileChanges, buildRollbackMap } from "../../utils/checkpointUtils";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { PanelToggles } from "../shared/PanelToggles";
+import { deriveTasks, processActivities, turnHasTaskActivity, hasTaskActivity } from "../../hooks/useTaskTracker";
+import type { TaskTrackerResult, TrackedTask } from "../../hooks/useTaskTracker";
 import { debugChat } from "../../utils/chatDebug";
 import styles from "./ChatPanel.module.css";
 
@@ -692,6 +694,10 @@ export function ChatPanel() {
               />
             )}
 
+            {selectedWorkspaceId && (
+              <CurrentTurnTaskProgress workspaceId={selectedWorkspaceId} />
+            )}
+
             {pendingQuestion && (
               <AgentQuestionCard
                 question={pendingQuestion}
@@ -857,53 +863,89 @@ function TurnSummary({
   turn,
   collapsed,
   onToggle,
+  taskProgress,
 }: {
   turn: CompletedTurn;
   collapsed: boolean;
   onToggle: () => void;
+  taskProgress?: TaskTrackerResult;
 }) {
   return (
-    <div
-      className={styles.turnSummary}
-      role="button"
-      tabIndex={0}
-      onClick={onToggle}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onToggle();
-        }
-      }}
-    >
-      <div className={styles.turnHeader}>
-        <span className={styles.toolChevron}>
-          {collapsed ? "›" : "⌄"}
-        </span>
-        <span className={styles.turnLabel}>
-          {turn.activities.length} tool call
-          {turn.activities.length !== 1 ? "s" : ""}
-          {turn.messageCount > 0 &&
-            `, ${turn.messageCount} message${turn.messageCount !== 1 ? "s" : ""}`}
-        </span>
-      </div>
-      {!collapsed && (
-        <div className={styles.turnActivities}>
-          {turn.activities.map((act: ToolActivity) => (
-            <div key={act.toolUseId} className={styles.toolActivity}>
-              <div className={styles.toolHeader}>
-                <span className={styles.toolName} style={{ color: toolColor(act.toolName) }}>
-                  {act.toolName}
-                </span>
-                {(act.summary || act.inputJson) && (
-                  <span className={styles.toolSummary}>
-                    {act.summary || extractToolSummary(act.toolName, act.inputJson)}
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
+    <div className={styles.turnSummaryWrapper}>
+      <div
+        className={styles.turnSummary}
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+      >
+        <div className={styles.turnHeader}>
+          <span className={styles.toolChevron}>
+            {collapsed ? "›" : "⌄"}
+          </span>
+          <span className={styles.turnLabel}>
+            {turn.activities.length} tool call
+            {turn.activities.length !== 1 ? "s" : ""}
+            {turn.messageCount > 0 &&
+              `, ${turn.messageCount} message${turn.messageCount !== 1 ? "s" : ""}`}
+          </span>
         </div>
+        {!collapsed && (
+          <div className={styles.turnActivities}>
+            {turn.activities.map((act: ToolActivity) => (
+              <div key={act.toolUseId} className={styles.toolActivity}>
+                <div className={styles.toolHeader}>
+                  <span className={styles.toolName} style={{ color: toolColor(act.toolName) }}>
+                    {act.toolName}
+                  </span>
+                  {(act.summary || act.inputJson) && (
+                    <span className={styles.toolSummary}>
+                      {act.summary || extractToolSummary(act.toolName, act.inputJson)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {taskProgress && taskProgress.totalCount > 0 && (
+        <TaskProgressBar
+          completedCount={taskProgress.completedCount}
+          totalCount={taskProgress.totalCount}
+        />
       )}
+    </div>
+  );
+}
+
+/** Inline progress bar rendered beneath a turn summary when tasks are present. */
+function TaskProgressBar({
+  completedCount,
+  totalCount,
+}: {
+  completedCount: number;
+  totalCount: number;
+}) {
+  const percent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+  const allDone = completedCount === totalCount;
+
+  return (
+    <div className={styles.taskProgressBar}>
+      <div className={styles.taskProgressTrack}>
+        <div
+          className={`${styles.taskProgressFill} ${allDone ? styles.taskProgressDone : ""}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <span className={styles.taskProgressLabel}>
+        {completedCount}/{totalCount} tasks
+      </span>
     </div>
   );
 }
@@ -956,6 +998,29 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
     [messages, checkpoints],
   );
 
+  // Compute cumulative task progress at each turn index in a single O(n) pass.
+  // Carries taskMap/todoMap forward across iterations instead of re-slicing.
+  const taskProgressByTurn = useMemo(() => {
+    const map = new Map<number, TaskTrackerResult>();
+    const taskMap = new Map<string, TrackedTask>();
+    const todoMap = new Map<string, TrackedTask>();
+    const nextSyntheticId = { value: 1 };
+    let anyTasksSoFar = false;
+
+    for (let i = 0; i < completedTurns.length; i++) {
+      processActivities(completedTurns[i].activities, taskMap, todoMap, nextSyntheticId);
+      if (turnHasTaskActivity(completedTurns[i])) {
+        anyTasksSoFar = true;
+      }
+      if (anyTasksSoFar) {
+        const tasks = [...taskMap.values(), ...todoMap.values()];
+        const completedCount = tasks.filter((t) => t.status === "completed").length;
+        map.set(i, { tasks, completedCount, totalCount: tasks.length });
+      }
+    }
+    return map;
+  }, [completedTurns]);
+
   useEffect(() => {
     debugChat("MessagesWithTurns", "layout", {
       workspaceId,
@@ -978,6 +1043,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
         turn={turn}
         collapsed={turn.collapsed}
         onToggle={() => toggleCompletedTurn(workspaceId, globalIdx)}
+        taskProgress={taskProgressByTurn.get(globalIdx)}
       />
     ));
   };
@@ -1042,6 +1108,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
             turn={turn}
             collapsed={turn.collapsed}
             onToggle={() => toggleCompletedTurn(workspaceId, globalIdx)}
+            taskProgress={taskProgressByTurn.get(globalIdx)}
           />
         ))}
     </>
@@ -1116,6 +1183,36 @@ const ToolActivitiesSection = memo(function ToolActivitiesSection({
         )}
       </div>
     </div>
+  );
+});
+
+/**
+ * Shows a progress bar for the current in-progress turn, only when
+ * task-related tools are among the current activities. Disappears when
+ * the turn finalises (tasks move into CompletedTurn rendering).
+ */
+const CurrentTurnTaskProgress = memo(function CurrentTurnTaskProgress({
+  workspaceId,
+}: {
+  workspaceId: string;
+}) {
+  const completedTurns = useAppStore(
+    (s) => s.completedTurns[workspaceId] ?? EMPTY_COMPLETED_TURNS
+  );
+  const toolActivities = useAppStore(
+    (s) => s.toolActivities[workspaceId] ?? EMPTY_ACTIVITIES
+  );
+
+  const result = useMemo(
+    () => deriveTasks(completedTurns, toolActivities),
+    [completedTurns, toolActivities]
+  );
+
+  // Only render when the current turn has task tools
+  if (!hasTaskActivity(toolActivities) || result.totalCount === 0) return null;
+
+  return (
+    <TaskProgressBar completedCount={result.completedCount} totalCount={result.totalCount} />
   );
 });
 
