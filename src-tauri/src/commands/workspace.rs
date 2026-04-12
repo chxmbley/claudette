@@ -5,6 +5,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use tokio::process::Command as TokioCommand;
 
+use claudette::agent;
 use claudette::config;
 use claudette::db::Database;
 use claudette::git;
@@ -27,6 +28,59 @@ pub struct SetupResult {
 pub struct CreateWorkspaceResult {
     pub workspace: Workspace,
     pub setup_result: Option<SetupResult>,
+}
+
+/// Read branch prefix settings from DB (sync).
+pub(crate) fn read_branch_prefix_settings(db: &Database) -> (String, String) {
+    let mode = db
+        .get_app_setting("git_branch_prefix_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "username".to_string());
+    let custom = db
+        .get_app_setting("git_branch_prefix_custom")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    (mode, custom)
+}
+
+/// Resolve the branch prefix from pre-read settings (async, no DB borrow).
+pub(crate) async fn resolve_branch_prefix(mode: &str, custom: &str) -> String {
+    match mode {
+        "custom" => {
+            let sanitized = custom
+                .trim()
+                .trim_matches('/')
+                .split('/')
+                .filter_map(|segment| {
+                    let s = agent::sanitize_branch_name(segment.trim(), 30);
+                    if s.is_empty() { None } else { Some(s) }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            if sanitized.is_empty() {
+                String::new()
+            } else {
+                format!("{sanitized}/")
+            }
+        }
+        "none" => String::new(),
+        _ => {
+            // "username" mode — read git config user.name
+            match git::get_git_username().await {
+                Ok(Some(name)) => {
+                    let slug = agent::sanitize_branch_name(&name, 30);
+                    if slug.is_empty() {
+                        "claudette/".to_string()
+                    } else {
+                        format!("{slug}/")
+                    }
+                }
+                _ => "claudette/".to_string(),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -57,7 +111,9 @@ pub async fn create_workspace(
     let repo_path = repo.path.clone();
     let settings_setup_script = repo.setup_script.clone();
 
-    let branch_name = format!("claudette/{name}");
+    let (prefix_mode, prefix_custom) = read_branch_prefix_settings(&db);
+    let prefix = resolve_branch_prefix(&prefix_mode, &prefix_custom).await;
+    let branch_name = format!("{prefix}{name}");
     let worktree_base = state.worktree_base_dir.read().await;
     let worktree_path: PathBuf = worktree_base.join(&repo.path_slug).join(&name);
     let worktree_path_str = worktree_path.to_string_lossy().to_string();
@@ -296,6 +352,17 @@ pub async fn archive_workspace(
 
     if let Some(ref wt_path) = ws.worktree_path {
         let _ = git::remove_worktree(&repo.path, wt_path, false).await;
+    }
+
+    // Optionally delete the branch if the user has enabled this setting.
+    let delete_branch = db
+        .get_app_setting("git_delete_branch_on_archive")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true");
+    if delete_branch {
+        let _ = git::branch_delete(&repo.path, &ws.branch_name).await;
     }
 
     // Stop any running agent and clear session so tray state stays consistent.

@@ -45,6 +45,8 @@ export function useKeyboardShortcuts() {
           toggleCommandPalette();
         } else if (activeModal) {
           closeModal();
+        } else if (useAppStore.getState().settingsOpen) {
+          useAppStore.getState().closeSettings();
         } else if (fuzzyFinderOpen) {
           toggleFuzzyFinder();
         } else if (diffSelectedFile) {
@@ -136,10 +138,10 @@ export function useKeyboardShortcuts() {
           e.preventDefault();
           {
             const store = useAppStore.getState();
-            if (store.activeModal === "appSettings") {
-              store.closeModal();
+            if (store.settingsOpen) {
+              store.closeSettings();
             } else {
-              store.openModal("appSettings");
+              store.openSettings();
             }
           }
           break;

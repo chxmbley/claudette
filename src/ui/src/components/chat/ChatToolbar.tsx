@@ -41,33 +41,45 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const [model, fast, thinking, effort, showThinking] = await Promise.all([
+      const [model, fast, thinking, effort, showThinking, defModel, defFast, defThinking, defPlan, defEffort, defShowThinking] = await Promise.all([
         getAppSetting(`model:${workspaceId}`),
         getAppSetting(`fast_mode:${workspaceId}`),
         getAppSetting(`thinking_enabled:${workspaceId}`),
         getAppSetting(`effort_level:${workspaceId}`),
         getAppSetting(`show_thinking:${workspaceId}`),
+        getAppSetting("default_model"),
+        getAppSetting("default_fast_mode"),
+        getAppSetting("default_thinking"),
+        getAppSetting("default_plan_mode"),
+        getAppSetting("default_effort"),
+        getAppSetting("default_show_thinking"),
       ]);
       if (cancelled) return;
-      const loadedModel = model ?? "opus";
-      if (model) setSelectedModel(workspaceId, model);
-      if (fast === "true") setFastMode(workspaceId, true);
-      if (thinking === "true") setThinkingEnabled(workspaceId, true);
+      const loadedModel = model ?? defModel ?? "opus";
+      setSelectedModel(workspaceId, loadedModel);
+      const effectiveFast = fast === "true" || (!fast && defFast === "true");
+      const effectiveThinking = thinking === "true" || (!thinking && defThinking === "true");
+      setFastMode(workspaceId, effectiveFast);
+      setThinkingEnabled(workspaceId, effectiveThinking);
+      // Plan mode is not persisted per-workspace (in-memory only); apply global
+      // default only when fast/thinking aren't already enabled.
+      setPlanMode(workspaceId, !effectiveFast && !effectiveThinking && defPlan === "true");
       // Normalize effort against the loaded model to prevent stale values.
-      if (effort) {
+      const effectiveEffort = effort ?? defEffort;
+      if (effectiveEffort) {
         const normalized = !isEffortSupported(loadedModel)
           ? "auto"
-          : effort === "max" && !isMaxEffortAllowed(loadedModel)
+          : effectiveEffort === "max" && !isMaxEffortAllowed(loadedModel)
             ? "high"
-            : effort;
+            : effectiveEffort;
         setEffortLevel(workspaceId, normalized);
       }
-      if (showThinking === "true") setShowThinkingBlocks(workspaceId, true);
+      setShowThinkingBlocks(workspaceId, showThinking === "true" || (!showThinking && defShowThinking === "true"));
       setLoaded(true);
     }
     load();
     return () => { cancelled = true; };
-  }, [workspaceId, setSelectedModel, setFastMode, setThinkingEnabled, setEffortLevel, setShowThinkingBlocks]);
+  }, [workspaceId, setSelectedModel, setFastMode, setThinkingEnabled, setPlanMode, setEffortLevel, setShowThinkingBlocks]);
 
   const handleModelSelect = useCallback(
     async (model: string) => {

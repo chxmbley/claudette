@@ -42,7 +42,8 @@ export function updateRepositorySettings(
   name: string,
   icon: string | null,
   setupScript: string | null,
-  customInstructions: string | null
+  customInstructions: string | null,
+  branchRenamePreferences: string | null
 ): Promise<void> {
   return invoke("update_repository_settings", {
     id,
@@ -50,6 +51,7 @@ export function updateRepositorySettings(
     icon,
     setupScript,
     customInstructions,
+    branchRenamePreferences,
   });
 }
 
@@ -342,6 +344,10 @@ import type { ThemeDefinition } from "../types/theme";
 
 export function listUserThemes(): Promise<ThemeDefinition[]> {
   return invoke("list_user_themes");
+}
+
+export function getGitUsername(): Promise<string | null> {
+  return invoke("get_git_username");
 }
 
 export function listNotificationSounds(): Promise<string[]> {
