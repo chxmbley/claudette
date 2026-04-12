@@ -23,6 +23,19 @@ export function checkpointHasFileChanges(
 }
 
 /**
+ * Determine whether clearing the entire conversation could involve
+ * restoring file changes. Returns true when any checkpoint has a non-null
+ * commit hash — meaning the agent edited files at some point. A clear-all
+ * rolls back to before the first turn, so even a single file-editing turn
+ * needs the restore checkbox.
+ */
+export function clearAllHasFileChanges(
+  checkpoints: ConversationCheckpoint[],
+): boolean {
+  return checkpoints.some((c) => c.commit_hash !== null);
+}
+
+/**
  * Build a map of message index → checkpoint for rollback buttons.
  * Each User message gets mapped to the most recent checkpoint at or
  * before it, so users can always roll back — even past interrupted

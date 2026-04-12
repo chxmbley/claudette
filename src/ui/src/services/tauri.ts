@@ -183,6 +183,10 @@ export function resetAgentSession(workspaceId: string): Promise<void> {
   return invoke("reset_agent_session", { workspaceId });
 }
 
+export function clearAttention(workspaceId: string): Promise<void> {
+  return invoke("clear_attention", { workspaceId });
+}
+
 // -- Checkpoints --
 
 import type { ConversationCheckpoint } from "../types/checkpoint";
@@ -323,6 +327,28 @@ import type { ThemeDefinition } from "../types/theme";
 
 export function listUserThemes(): Promise<ThemeDefinition[]> {
   return invoke("list_user_themes");
+}
+
+export function listNotificationSounds(): Promise<string[]> {
+  return invoke("list_notification_sounds");
+}
+
+export function playNotificationSound(sound: string): Promise<void> {
+  return invoke("play_notification_sound", { sound });
+}
+
+export function runNotificationCommand(
+  title: string,
+  body: string,
+  workspaceId: string,
+  workspaceName: string,
+): Promise<void> {
+  return invoke("run_notification_command", {
+    title,
+    body,
+    workspaceId,
+    workspaceName,
+  });
 }
 
 // -- Remote --

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "./stores/useAppStore";
-import { loadInitialData, getAppSetting, listRemoteConnections, listDiscoveredServers, getLocalServerStatus } from "./services/tauri";
+import { loadInitialData, getAppSetting, listRemoteConnections, listDiscoveredServers, getLocalServerStatus, clearAttention } from "./services/tauri";
 import { applyTheme, loadAllThemes, findTheme } from "./utils/theme";
 import { AppLayout } from "./components/layout/AppLayout";
 import type { CommandEvent } from "./types";
@@ -13,7 +13,6 @@ function App() {
   const setWorktreeBaseDir = useAppStore((s) => s.setWorktreeBaseDir);
   const setDefaultBranches = useAppStore((s) => s.setDefaultBranches);
   const setTerminalFontSize = useAppStore((s) => s.setTerminalFontSize);
-  const setAudioNotifications = useAppStore((s) => s.setAudioNotifications);
   const setLastMessages = useAppStore((s) => s.setLastMessages);
   const setRemoteConnections = useAppStore((s) => s.setRemoteConnections);
   const setDiscoveredServers = useAppStore((s) => s.setDiscoveredServers);
@@ -47,11 +46,6 @@ function App() {
         }
       })
       .catch((err) => console.error("Failed to load terminal font size:", err));
-    getAppSetting("audio_notifications")
-      .then((val) => {
-        if (val === "true") setAudioNotifications(true);
-      })
-      .catch((err) => console.error("Failed to load audio notifications setting:", err));
     getAppSetting("theme")
       .then(async (savedThemeId) => {
         const allThemes = await loadAllThemes();
@@ -133,6 +127,12 @@ function App() {
       }
     });
 
+    // Listen for tray workspace selection events.
+    const unlistenTray = listen<string>("tray-select-workspace", (event) => {
+      useAppStore.getState().selectWorkspace(event.payload);
+      clearAttention(event.payload).catch(() => {});
+    });
+
     return () => {
       isActive = false;
       window.clearInterval(discoveredServersPollId);
@@ -140,6 +140,7 @@ function App() {
       void unlistenCommandEventsPromise.then((unlisten) => {
         unlisten();
       });
+      unlistenTray.then((fn) => fn());
     };
   }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId]);
 

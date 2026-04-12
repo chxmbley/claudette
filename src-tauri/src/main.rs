@@ -8,8 +8,11 @@ mod pty;
 mod remote;
 mod state;
 mod transport;
+mod tray;
 
 use std::path::PathBuf;
+
+use tauri::Manager;
 
 use claudette::db::Database;
 
@@ -52,24 +55,164 @@ fn main() {
     let app_state = state::AppState::new(db_path, worktree_base_dir);
     let remote_manager = remote::RemoteConnectionManager::new();
 
-    let builder = tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(app_state)
-        .manage(remote_manager)
+        .manage(remote_manager);
+
+    // Custom app menu (macOS only): replace the default Quit item (which
+    // calls NSApp.terminate() immediately) with one we can intercept to
+    // confirm quit when agents are running.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .menu(|app| {
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+                let app_menu = Submenu::with_items(
+                    app,
+                    "Claudette",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(app, None, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::services(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::hide(app, None)?,
+                        &PredefinedMenuItem::hide_others(app, None)?,
+                        &PredefinedMenuItem::show_all(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &MenuItem::with_id(
+                            app,
+                            "quit-app",
+                            "Quit Claudette",
+                            true,
+                            Some("CmdOrCtrl+Q"),
+                        )?,
+                    ],
+                )?;
+                let edit_menu = Submenu::with_items(
+                    app,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, None)?,
+                        &PredefinedMenuItem::redo(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, None)?,
+                        &PredefinedMenuItem::copy(app, None)?,
+                        &PredefinedMenuItem::paste(app, None)?,
+                        &PredefinedMenuItem::select_all(app, None)?,
+                    ],
+                )?;
+                let window_menu = Submenu::with_items(
+                    app,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(app, None)?,
+                        &PredefinedMenuItem::maximize(app, None)?,
+                        &PredefinedMenuItem::close_window(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::fullscreen(app, None)?,
+                    ],
+                )?;
+                Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+            })
+            .on_menu_event(|app, event| {
+                if event.id().as_ref() == "quit-app" {
+                    let state = app.state::<state::AppState>();
+                    let running = state
+                        .agents
+                        .try_read()
+                        .map_or(true, |a| tray::has_running_agents(&a));
+                    if running {
+                        let handle = app.clone();
+                        {
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                            handle
+                                .dialog()
+                                .message("Agents are still running. Quit anyway?")
+                                .title("Quit Claudette")
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    "Quit".into(),
+                                    "Cancel".into(),
+                                ))
+                                .show(move |confirmed| {
+                                    if confirmed {
+                                        handle.exit(0);
+                                    }
+                                });
+                        }
+                    } else {
+                        app.exit(0);
+                    }
+                }
+            });
+    }
+
+    let builder = builder
         .setup(move |app| {
             // Start mDNS browser to discover nearby claudette-server instances.
             if let Err(e) = mdns::start_mdns_browser(app.handle(), saved_fingerprints) {
                 eprintln!("[mdns] Failed to start browser: {e}");
             }
 
+            // Set the notification app identity before any notifications are sent.
+            // mac-notification-sys uses Once — first call wins. We call early so
+            // both our direct calls and the tauri-plugin-notification share the
+            // same identity.
+            #[cfg(target_os = "macos")]
+            {
+                let bundle_id = app.config().identifier.clone();
+                let identity = if cfg!(debug_assertions) {
+                    "com.apple.Terminal".to_string()
+                } else {
+                    bundle_id
+                };
+                let _ = mac_notification_sys::set_application(&identity);
+            }
+
             // Start debug eval TCP server (dev builds only).
             #[cfg(debug_assertions)]
             commands::debug::start_debug_server(app.handle().clone());
 
+            // Set up the system tray icon (respects tray_enabled setting).
+            if let Err(e) = tray::setup_tray(app.handle()) {
+                eprintln!("[tray] Failed to setup tray: {e}");
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // On macOS, Cmd+W always hides (standard behavior).
+                #[cfg(target_os = "macos")]
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // On Linux, hide to tray only when agents are running;
+                // otherwise let the close proceed normally (quits the app).
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let state = window.app_handle().state::<state::AppState>();
+                    let has_tray = state.tray_handle.lock().is_ok_and(|g| g.is_some());
+                    // Fail closed: if the lock is contended, assume agents
+                    // are running so we don't accidentally quit mid-task.
+                    let running = state
+                        .agents
+                        .try_read()
+                        .map_or(true, |a| tray::has_running_agents(&a));
+                    if has_tray && running {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // Data
@@ -99,6 +242,7 @@ fn main() {
             commands::chat::send_chat_message,
             commands::chat::stop_agent,
             commands::chat::reset_agent_session,
+            commands::chat::clear_attention,
             commands::chat::list_checkpoints,
             commands::chat::rollback_to_checkpoint,
             commands::chat::clear_conversation,
@@ -124,6 +268,9 @@ fn main() {
             commands::settings::get_app_setting,
             commands::settings::set_app_setting,
             commands::settings::list_user_themes,
+            commands::settings::list_notification_sounds,
+            commands::settings::play_notification_sound,
+            commands::settings::run_notification_command,
             // Shell Integration
             commands::shell::setup_shell_integration,
             commands::shell::apply_shell_integration,
@@ -149,6 +296,19 @@ fn main() {
         ]);
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running Claudette");
+        .build(tauri::generate_context!())
+        .expect("error while building Claudette")
+        .run(|_app, _event| {
+            // Show the window when the dock icon is clicked (macOS reopen).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(window) = _app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                // Navigate to session needing attention, if any.
+                tray::navigate_to_attention(_app);
+            }
+        });
 }

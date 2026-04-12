@@ -72,15 +72,46 @@
             inherit version;
             src = ./src/ui;
 
-            nativeBuildInputs = [ pkgs.bun ];
+            # nodejs is only needed on Linux to resolve the
+            # `#!/usr/bin/env node` shebangs that bun installs into
+            # node_modules — the Nix build sandbox on Linux has no
+            # /usr/bin/env, so patchShebangs rewrites them to an absolute
+            # store path. macOS's sandbox has /usr/bin/env and the original
+            # FOD hash was computed without patching, so keep the old code
+            # path there to avoid a pointless hash churn.
+            nativeBuildInputs = [
+              pkgs.bun
+            ]
+            ++ lib.optionals pkgs.stdenv.isLinux [
+              pkgs.nodejs
+            ];
 
             outputHashMode = "recursive";
             outputHashAlgo = "sha256";
-            outputHash = "sha256-B5jdCpB8PCOmBvptaigcRZRZSBBfQ4Tm6CaN+VMNvCI=";
+            # FOD hashes differ across platforms because vite/tsc can embed
+            # platform-specific paths into its sourcemap output, and on
+            # Linux we additionally patchShebangs the node_modules tree.
+            # Update the relevant branch when src/ui/bun.lock or
+            # package.json change:
+            #   nix build .#frontend 2>&1 | grep 'got:' | awk '{print $2}'
+            outputHash =
+              if pkgs.stdenv.isDarwin then
+                "sha256-B5jdCpB8PCOmBvptaigcRZRZSBBfQ4Tm6CaN+VMNvCI="
+              else
+                "sha256-Zoht+jChNYNKQvNftpnu/o3lod+xXYQUzOupugrRDt8=";
 
             buildPhase = ''
               export HOME=$TMPDIR
               bun install --frozen-lockfile
+            ''
+            + lib.optionalString pkgs.stdenv.isLinux ''
+              # Patch the real binary files, not the .bin/ symlinks —
+              # patchShebangs doesn't follow symlinks into unrelated paths,
+              # and the actual tsc/vite binaries live under their package
+              # directories (e.g. node_modules/typescript/bin/tsc).
+              patchShebangs node_modules
+            ''
+            + ''
               bun run build
             '';
 
@@ -109,13 +140,39 @@
             pkgs.libiconv
           ];
 
+          # Linux native deps for webkit + GTK stack.
+          # NOTE: cairo / pango / harfbuzz / atk / gdk-pixbuf are propagated by
+          # gtk3, so nixpkgs' pkg-config setup hook picks them up automatically
+          # under `pkgs.mkShell` and `stdenv.mkDerivation`. We still list them
+          # here explicitly because `numtide/devshell` does not run that hook,
+          # and the devshell's PKG_CONFIG_PATH is built from this list below.
+          # Listing them in the package build too is harmless (they're already
+          # propagated) and keeps one source of truth for Linux deps.
           linuxBuildInputs = lib.optionals pkgs.stdenv.isLinux [
             pkgs.webkitgtk_4_1
             pkgs.gtk3
+            pkgs.cairo
+            pkgs.pango
+            pkgs.harfbuzz
+            pkgs.atk
+            pkgs.gdk-pixbuf
             pkgs.libsoup_3
             pkgs.glib
-            pkgs.openssl
             pkgs.glib-networking
+            pkgs.openssl
+            pkgs.zlib
+            pkgs.libayatana-appindicator
+            # webkit2gtk delegates <video>/<audio> rendering to GStreamer.
+            # Without gst-plugins-base the dev log fills with
+            # `GStreamer element appsink not found. Please install it.`
+            # and any future media element fails silently.
+            pkgs.gst_all_1.gstreamer
+            pkgs.gst_all_1.gst-plugins-base
+            # Desktop-wide GSettings schemas (org.gtk.Settings.FileChooser,
+            # org.gnome.desktop.interface, etc.). Without this package GTK's
+            # file chooser aborts the process on open with
+            # `GLib-GIO-ERROR: No GSettings schemas are installed`.
+            pkgs.gsettings-desktop-schemas
           ];
 
           commonCraneArgs = {
@@ -236,6 +293,13 @@
             ++ darwinBuildInputs
             ++ linuxBuildInputs
             ++ lib.optionals pkgs.stdenv.isLinux [
+              # Anchor cc / ld / binutils to THIS flake's nixpkgs revision.
+              # Without this, the devshell picks up whatever system cc is on
+              # the user's PATH — on NixOS that's often an older-channel
+              # glibc, which then mismatches webkitgtk_4_1 (built against
+              # unstable's newer glibc) and fails at dynlink time with
+              # "version `GLIBC_2.XX' not found".
+              pkgs.stdenv.cc
               pkgs.wrapGAppsHook4
             ];
 
@@ -243,6 +307,88 @@
               {
                 name = "RUST_SRC_PATH";
                 value = "${fenixPkgs.latest.rust-src}/lib/rustlib/src/rust/library";
+              }
+            ]
+            ++ lib.optionals pkgs.stdenv.isLinux [
+              {
+                # numtide/devshell doesn't run nixpkgs' pkg-config setup hook,
+                # so propagated transitive deps (cairo/pango/atk/...) don't end
+                # up on PKG_CONFIG_PATH automatically. Build it by hand from
+                # linuxBuildInputs — see the note there about why the full
+                # gtk3 closure is listed explicitly.
+                name = "PKG_CONFIG_PATH";
+                value = lib.makeSearchPath "lib/pkgconfig" (map lib.getDev linuxBuildInputs);
+              }
+              {
+                # Runtime dynamic linker search path. webkit2gtk/gtk/
+                # libayatana-appindicator are dlopen'd at `cargo tauri dev`
+                # launch time — without this the window never opens.
+                name = "LD_LIBRARY_PATH";
+                value = lib.makeLibraryPath linuxBuildInputs;
+              }
+              {
+                # Link-time search path replacement for NIX_LDFLAGS.
+                # Under `pkgs.mkShell`, the cc-wrapper setup hook would add
+                # every buildInput's lib dir to the linker search path.
+                # devshell skips that hook, so libs referenced by naked -l
+                # entries inside a .pc Libs: field (e.g. `-lz` inside
+                # gdk-3.0.pc) are unreachable even though the package is
+                # in buildInputs. We hand rustc the full list of -L paths
+                # so rust-lld can resolve them during the final link step.
+                name = "RUSTFLAGS";
+                value = lib.concatStringsSep " " (map (p: "-L${lib.getLib p}/lib") linuxBuildInputs);
+              }
+              {
+                # WebKitGTK's DMA-BUF renderer crashes the Wayland session on
+                # current Mesa/compositors with `Gdk-Message: Error 71
+                # (Protocol error) dispatching to Wayland display`. Disabling
+                # DMA-BUF falls back to a GL-via-EGL path that's stable on
+                # GNOME/KDE/Sway on NixOS while still keeping webkit's GL
+                # compositor active — which is what drives HiDPI scaling, so
+                # leaving compositing mode enabled keeps devicePixelRatio
+                # honoring the GTK scale factor. Tauri upstream recommends
+                # this workaround until webkit2gtk ships a fix.
+                name = "WEBKIT_DISABLE_DMABUF_RENDERER";
+                value = "1";
+              }
+              {
+                # glib-networking ships the GIO TLS backend (libgiognutls.so)
+                # that webkit uses for every HTTPS request. nixpkgs' setup
+                # hook would normally prepend its gio/modules path to
+                # GIO_EXTRA_MODULES; devshell doesn't run hooks, so webkit
+                # loads with no TLS backend and every fetch to https://
+                # errors with `TLS support is not available`. Prepend (don't
+                # replace) so inherited gvfs/dconf modules from the host
+                # session are still picked up.
+                name = "GIO_EXTRA_MODULES";
+                prefix = "${pkgs.glib-networking}/lib/gio/modules";
+              }
+              {
+                # Force the app through XWayland. webkit2gtk's native-Wayland
+                # path mis-handles fractional scaling on current NixOS
+                # compositors: window.devicePixelRatio comes back as -1/96
+                # and innerWidth/innerHeight as large negatives, collapsing
+                # the entire layout into a negative viewport. XWayland
+                # exposes only integer scale factors to the client, which
+                # avoids the broken fractional-scale code path entirely.
+                # Slight HiDPI fidelity loss vs. native Wayland is an
+                # acceptable dev-loop tradeoff until upstream webkit2gtk
+                # ships a fix.
+                name = "GDK_BACKEND";
+                value = "x11";
+              }
+              {
+                # GSettings schema search path. nixpkgs installs compiled
+                # schemas at $out/share/gsettings-schemas/$NAME/glib-2.0/
+                # schemas/, and GIO walks XDG_DATA_DIRS appending
+                # glib-2.0/schemas/ to each entry. Without this prefix, the
+                # GTK file chooser aborts the process the first time it's
+                # opened (`GLib-GIO-ERROR: No GSettings schemas are
+                # installed`). Prepend both the desktop-wide schemas
+                # (FileChooser, Interface, etc.) and gtk3's own schemas,
+                # preserving any inherited host paths after.
+                name = "XDG_DATA_DIRS";
+                eval = ''"${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"'';
               }
             ]
             ++ lib.optionals pkgs.stdenv.isDarwin [

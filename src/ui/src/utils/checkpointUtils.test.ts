@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { checkpointHasFileChanges, buildRollbackMap } from "./checkpointUtils";
+import { checkpointHasFileChanges, clearAllHasFileChanges, buildRollbackMap } from "./checkpointUtils";
 import type { ConversationCheckpoint } from "../types/checkpoint";
 import type { ChatMessage } from "../types/chat";
 
@@ -73,6 +73,51 @@ describe("checkpointHasFileChanges", () => {
       cp("cp3", "aaa", 2),
     ];
     expect(checkpointHasFileChanges(target, all)).toBe(false);
+  });
+});
+
+describe("clearAllHasFileChanges", () => {
+  it("returns false when no checkpoints exist", () => {
+    expect(clearAllHasFileChanges([])).toBe(false);
+  });
+
+  it("returns false when no checkpoints have commit hashes", () => {
+    expect(clearAllHasFileChanges([cp("cp1", null, 0), cp("cp2", null, 1)])).toBe(false);
+  });
+
+  it("returns true when all checkpoints have the same hash (files were edited)", () => {
+    expect(clearAllHasFileChanges([
+      cp("cp1", "aaa", 0),
+      cp("cp2", "aaa", 1),
+      cp("cp3", "aaa", 2),
+    ])).toBe(true);
+  });
+
+  it("returns true when only one checkpoint has a hash (single file-editing turn)", () => {
+    expect(clearAllHasFileChanges([cp("cp1", "aaa", 0)])).toBe(true);
+  });
+
+  it("returns true when checkpoints have different hashes", () => {
+    expect(clearAllHasFileChanges([
+      cp("cp1", "aaa", 0),
+      cp("cp2", "bbb", 1),
+    ])).toBe(true);
+  });
+
+  it("returns true with mix of null and different hashes", () => {
+    expect(clearAllHasFileChanges([
+      cp("cp1", null, 0),
+      cp("cp2", "aaa", 1),
+      cp("cp3", "bbb", 2),
+    ])).toBe(true);
+  });
+
+  it("returns true with mix of null and same hashes (files were still edited)", () => {
+    expect(clearAllHasFileChanges([
+      cp("cp1", null, 0),
+      cp("cp2", "aaa", 1),
+      cp("cp3", "aaa", 2),
+    ])).toBe(true);
   });
 });
 

@@ -31,7 +31,7 @@ import { ChatToolbar } from "./ChatToolbar";
 import { WorkspaceActions } from "./WorkspaceActions";
 import { HeaderMenu } from "./HeaderMenu";
 import { SlashCommandPicker, filterSlashCommands } from "./SlashCommandPicker";
-import { checkpointHasFileChanges, buildRollbackMap } from "../../utils/checkpointUtils";
+import { checkpointHasFileChanges, clearAllHasFileChanges, buildRollbackMap } from "../../utils/checkpointUtils";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { debugChat } from "../../utils/chatDebug";
 import styles from "./ChatPanel.module.css";
@@ -995,7 +995,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
                       messageContent: msg.content,
                       hasFileChanges: cp
                         ? checkpointHasFileChanges(cp, checkpoints)
-                        : checkpoints.some((c) => !!c.commit_hash),
+                        : clearAllHasFileChanges(checkpoints),
                     });
                   }}
                 >
@@ -1130,6 +1130,21 @@ function ChatInputArea({
   const [slashPickerDismissed, setSlashPickerDismissed] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Per-workspace draft storage: save input when switching away,
+  // restore when switching back.
+  const draftsRef = useRef<Record<string, string>>({});
+  const prevWorkspaceRef = useRef(selectedWorkspaceId);
+  useEffect(() => {
+    const prev = prevWorkspaceRef.current;
+    if (prev !== selectedWorkspaceId) {
+      // Save draft for the workspace we're leaving.
+      draftsRef.current[prev] = chatInput;
+      // Restore draft for the workspace we're entering.
+      setChatInput(draftsRef.current[selectedWorkspaceId] ?? "");
+      prevWorkspaceRef.current = selectedWorkspaceId;
+    }
+  }, [selectedWorkspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-focus the textarea when switching or creating workspaces.
   useEffect(() => {
