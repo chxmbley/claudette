@@ -161,7 +161,11 @@ pub async fn restore_worktree(
     branch_name: &str,
     worktree_path: &str,
 ) -> Result<String, GitError> {
-    run_git(repo_path, &["worktree", "add", worktree_path, branch_name]).await?;
+    run_git(
+        repo_path,
+        &["worktree", "add", worktree_path, "--", branch_name],
+    )
+    .await?;
     let abs_path = std::path::Path::new(worktree_path)
         .canonicalize()
         .map_err(|e| GitError::CommandFailed(e.to_string()))?;
@@ -206,10 +210,13 @@ pub async fn has_unmerged_commits(
 /// Delete a branch. Tries safe `-d` first; falls back to force `-D`
 /// if `-d` fails.
 pub async fn branch_delete(repo_path: &str, branch: &str) -> Result<(), GitError> {
-    if run_git(repo_path, &["branch", "-d", branch]).await.is_ok() {
+    if run_git(repo_path, &["branch", "-d", "--", branch])
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
-    run_git(repo_path, &["branch", "-D", branch]).await?;
+    run_git(repo_path, &["branch", "-D", "--", branch]).await?;
     Ok(())
 }
 
@@ -250,7 +257,7 @@ pub async fn restore_to_commit(worktree_path: &str, commit_hash: &str) -> Result
 /// `path` can be a repo root or a worktree — when the branch is checked
 /// out in a linked worktree, pass the worktree path to avoid errors.
 pub async fn rename_branch(path: &str, old_name: &str, new_name: &str) -> Result<(), GitError> {
-    run_git(path, &["branch", "-m", old_name, new_name]).await?;
+    run_git(path, &["branch", "-m", "--", old_name, new_name]).await?;
     Ok(())
 }
 
@@ -416,6 +423,35 @@ mod tests {
             .await
             .unwrap();
         assert!(branches.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_restore_worktree() {
+        let dir = setup_temp_repo().await;
+        let repo_path = dir.path().to_str().unwrap();
+
+        // Create a branch via create_worktree, then remove the worktree.
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().to_str().unwrap();
+        create_worktree(repo_path, "claudette/restore-test", wt_path)
+            .await
+            .unwrap();
+        remove_worktree(repo_path, wt_path, true).await.unwrap();
+
+        // Restore the worktree for the existing branch.
+        let wt_dir2 = tempfile::tempdir().unwrap();
+        let wt_path2 = wt_dir2.path().to_str().unwrap();
+        let abs = restore_worktree(repo_path, "claudette/restore-test", wt_path2)
+            .await
+            .unwrap();
+        assert!(!abs.is_empty());
+
+        // The restored worktree should be on the expected branch.
+        let branch = current_branch(wt_path2).await.unwrap();
+        assert_eq!(branch, "claudette/restore-test");
+
+        // Clean up.
+        remove_worktree(repo_path, wt_path2, true).await.unwrap();
     }
 
     #[tokio::test]
