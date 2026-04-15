@@ -160,11 +160,11 @@ pub async fn spawn_pty(
                                 );
                             }
                             Osc133Event::PromptStart => {
-                                // Prompt appeared - reset running state if still set
-                                let mut running = running_clone.lock();
-                                if *running {
-                                    *running = false;
-                                }
+                                // Prompt appeared — reset running state and clear stale
+                                // command.  Lock each mutex independently (assigning
+                                // false is idempotent, no conditional needed).
+                                *running_clone.lock() = false;
+                                *cmd_clone.lock() = None;
                             }
                         }
                     }
