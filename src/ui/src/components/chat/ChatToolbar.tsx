@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Sparkles, Zap, Brain, BookOpen, Gauge, Eye, EyeOff, Globe } from "lucide-react";
+import { BadgeDollarSign, Sparkles, Zap, Brain, BookOpen, Gauge, Eye, EyeOff, Globe } from "lucide-react";
 import { useAppStore } from "../../stores/useAppStore";
 import { resetAgentSession, setAppSetting, getAppSetting } from "../../services/tauri";
 import { ModelSelector, MODELS } from "./ModelSelector";
-import { EffortSelector, EFFORT_LEVELS, isMaxEffortAllowed, isEffortSupported } from "./EffortSelector";
+import { EffortSelector, EFFORT_LEVELS } from "./EffortSelector";
+import { isFastSupported, isEffortSupported, isXhighEffortAllowed, isMaxEffortAllowed } from "./modelCapabilities";
 import styles from "./ChatToolbar.module.css";
 
 interface ChatToolbarProps {
@@ -61,7 +62,7 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
       if (cancelled) return;
       const loadedModel = model ?? defModel ?? "opus";
       setSelectedModel(workspaceId, loadedModel);
-      const effectiveFast = fast === "true" || (!fast && defFast === "true");
+      const effectiveFast = isFastSupported(loadedModel) && (fast === "true" || (!fast && defFast === "true"));
       const effectiveThinking = thinking === "true" || (!thinking && defThinking === "true");
       setFastMode(workspaceId, effectiveFast);
       setThinkingEnabled(workspaceId, effectiveThinking);
@@ -73,9 +74,11 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
       if (effectiveEffort) {
         const normalized = !isEffortSupported(loadedModel)
           ? "auto"
-          : effectiveEffort === "max" && !isMaxEffortAllowed(loadedModel)
+          : effectiveEffort === "xhigh" && !isXhighEffortAllowed(loadedModel)
             ? "high"
-            : effectiveEffort;
+            : effectiveEffort === "max" && !isMaxEffortAllowed(loadedModel)
+              ? "high"
+              : effectiveEffort;
         setEffortLevel(workspaceId, normalized);
       }
       setShowThinkingBlocks(workspaceId, showThinking === "true" || (!showThinking && defShowThinking === "true"));
@@ -95,11 +98,20 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
         await resetAgentSession(workspaceId);
         clearAgentQuestion(workspaceId);
         clearPlanApproval(workspaceId);
+        // Turn off fast mode if the new model doesn't support it.
+        if (fastMode && !isFastSupported(model)) {
+          setFastMode(workspaceId, false);
+          await setAppSetting(`fast_mode:${workspaceId}`, "false");
+        }
         // Reset effort when switching to a model with different support.
         if (!isEffortSupported(model)) {
           // Model doesn't support effort at all — clear to auto (won't be sent).
           setEffortLevel(workspaceId, "auto");
           await setAppSetting(`effort_level:${workspaceId}`, "auto");
+        } else if (effortLevel === "xhigh" && !isXhighEffortAllowed(model)) {
+          // Model supports effort but not "xhigh" — fall back to high.
+          setEffortLevel(workspaceId, "high");
+          await setAppSetting(`effort_level:${workspaceId}`, "high");
         } else if (effortLevel === "max" && !isMaxEffortAllowed(model)) {
           // Model supports effort but not "max" — fall back to high.
           setEffortLevel(workspaceId, "high");
@@ -108,7 +120,7 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
       }
       setModelSelectorOpen(false);
     },
-    [workspaceId, selectedModel, effortLevel, setSelectedModel, setEffortLevel, setModelSelectorOpen, clearAgentQuestion, clearPlanApproval]
+    [workspaceId, selectedModel, fastMode, effortLevel, setSelectedModel, setFastMode, setEffortLevel, setModelSelectorOpen, clearAgentQuestion, clearPlanApproval]
   );
 
   const handleEffortSelect = useCallback(
@@ -164,8 +176,9 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
     return () => window.removeEventListener("keydown", handleKey);
   }, [disabled, toggleThinking]);
 
-  const modelLabel =
-    MODELS.find((m) => m.id === selectedModel)?.label ?? selectedModel;
+  const currentModel = MODELS.find((m) => m.id === selectedModel);
+  const modelLabel = currentModel?.label ?? selectedModel;
+  const isExtraUsage = currentModel?.extraUsage ?? false;
   const effortLabel =
     EFFORT_LEVELS.find((l) => l.id === effortLevel)?.label ?? effortLevel;
 
@@ -178,21 +191,24 @@ export function ChatToolbar({ workspaceId, disabled }: ChatToolbarProps) {
         className={`${styles.chip}`}
         onClick={() => setModelSelectorOpen(!modelSelectorOpen)}
         disabled={disabled}
-        title="Change model"
+        title={isExtraUsage ? "Change model (extra usage: 1M context billed at API rates)" : "Change model"}
       >
         <Sparkles size={14} />
         <span className={styles.chipLabel}>{modelLabel}</span>
+        {isExtraUsage && <BadgeDollarSign size={14} className={styles.extraUsage} />}
       </button>
 
-      <button
-        className={`${styles.chip} ${fastMode ? styles.chipActive : ""}`}
-        onClick={toggleFast}
-        disabled={disabled}
-        title={`${fastMode ? "Disable" : "Enable"} fast mode (faster output, same model)`}
-        aria-pressed={fastMode}
-      >
-        <Zap size={14} />
-      </button>
+      {isFastSupported(selectedModel) && (
+        <button
+          className={`${styles.chip} ${fastMode ? styles.chipActive : ""}`}
+          onClick={toggleFast}
+          disabled={disabled}
+          title={`${fastMode ? "Disable" : "Enable"} fast mode (faster output, same model)`}
+          aria-pressed={fastMode}
+        >
+          <Zap size={14} />
+        </button>
+      )}
 
       <button
         className={`${styles.chip} ${thinkingEnabled ? styles.chipActive : ""}`}

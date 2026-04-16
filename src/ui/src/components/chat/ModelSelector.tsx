@@ -1,11 +1,14 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { BadgeDollarSign } from "lucide-react";
 import styles from "./ModelSelector.module.css";
 
 export const MODELS = [
-  { id: "opus", label: "Opus 4.6 1M", group: "Claude Code" },
-  { id: "claude-opus-4-6", label: "Opus 4.6", group: "Claude Code" },
-  { id: "sonnet", label: "Sonnet 4.6", group: "Claude Code" },
-  { id: "haiku", label: "Haiku 4.5", group: "Claude Code" },
+  { id: "opus", label: "Opus 4.7 1M", group: "Claude Code", extraUsage: true },
+  { id: "claude-opus-4-7", label: "Opus 4.7", group: "Claude Code", extraUsage: false },
+  { id: "claude-opus-4-6", label: "Opus 4.6", group: "Claude Code", extraUsage: false },
+  { id: "sonnet", label: "Sonnet 4.6", group: "Claude Code", extraUsage: false },
+  { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 1M", group: "Claude Code", extraUsage: true },
+  { id: "haiku", label: "Haiku 4.5", group: "Claude Code", extraUsage: false },
 ] as const;
 
 interface ModelSelectorProps {
@@ -57,6 +60,14 @@ export function ModelSelector({
               >
                 <span className={styles.dot} />
                 {model.label}
+                {model.extraUsage && (
+                  <span
+                    className={styles.extraUsage}
+                    title="Extra usage: 1M context requests are billed at API rates beyond your subscription plan allocation"
+                  >
+                    <BadgeDollarSign size={14} />
+                  </span>
+                )}
                 {model.id === selected && <span className={styles.check}>✓</span>}
               </button>
             ))}

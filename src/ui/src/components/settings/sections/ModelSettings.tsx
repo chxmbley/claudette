@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { getAppSetting, setAppSetting } from "../../../services/tauri";
 import { MODELS } from "../../chat/ModelSelector";
-import { EFFORT_LEVELS, isEffortSupported, isMaxEffortAllowed } from "../../chat/EffortSelector";
+import { EFFORT_LEVELS } from "../../chat/EffortSelector";
+import { isFastSupported, isEffortSupported, isXhighEffortAllowed, isMaxEffortAllowed } from "../../chat/modelCapabilities";
 import styles from "../Settings.module.css";
 
 export function ModelSettings() {
@@ -50,10 +51,18 @@ export function ModelSettings() {
   const handleModelChange = async (model: string) => {
     setDefaultModel(model);
     await saveSetting("default_model", model);
+    // Normalize fast mode when model changes
+    if (defaultFastMode && !isFastSupported(model)) {
+      setDefaultFastMode(false);
+      await saveSetting("default_fast_mode", "false");
+    }
     // Normalize effort when model changes
     if (!isEffortSupported(model)) {
       setDefaultEffort("auto");
       await saveSetting("default_effort", "auto");
+    } else if (defaultEffort === "xhigh" && !isXhighEffortAllowed(model)) {
+      setDefaultEffort("high");
+      await saveSetting("default_effort", "high");
     } else if (defaultEffort === "max" && !isMaxEffortAllowed(model)) {
       setDefaultEffort("high");
       await saveSetting("default_effort", "high");
@@ -88,10 +97,13 @@ export function ModelSettings() {
   };
 
   // Filter effort levels based on selected default model
-  const availableEffortLevels = isMaxEffortAllowed(defaultModel)
+  const availableEffortLevels = isXhighEffortAllowed(defaultModel)
     ? EFFORT_LEVELS
-    : EFFORT_LEVELS.filter((l) => l.id !== "max");
+    : isMaxEffortAllowed(defaultModel)
+      ? EFFORT_LEVELS.filter((l) => l.id !== "xhigh")
+      : EFFORT_LEVELS.filter((l) => l.id !== "xhigh" && l.id !== "max");
   const effortDisabled = !isEffortSupported(defaultModel);
+  const fastDisabled = !isFastSupported(defaultModel);
 
   return (
     <div>
@@ -204,6 +216,7 @@ export function ModelSettings() {
           <div className={styles.settingLabel}>Default to fast mode</div>
           <div className={styles.settingDescription}>
             Start new chats in fast mode
+            {fastDisabled && " (not supported by selected model)"}
           </div>
         </div>
         <div className={styles.settingControl}>
@@ -212,7 +225,9 @@ export function ModelSettings() {
             role="switch"
             aria-checked={defaultFastMode}
             aria-label="Default to fast mode"
-            data-checked={defaultFastMode}
+            data-checked={defaultFastMode && !fastDisabled}
+            disabled={fastDisabled}
+            style={{ opacity: fastDisabled ? 0.5 : 1 }}
             onClick={handleToggle(defaultFastMode, setDefaultFastMode, "default_fast_mode")}
           >
             <div className={styles.toggleKnob} />

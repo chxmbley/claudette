@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  BadgeDollarSign,
   PanelLeft,
   Terminal,
   GitCompare,
@@ -21,7 +22,8 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { ThemeDefinition } from "../../types/theme";
-import { isEffortSupported, isMaxEffortAllowed } from "../chat/EffortSelector";
+import { MODELS } from "../chat/ModelSelector";
+import { isFastSupported, isEffortSupported, isXhighEffortAllowed, isMaxEffortAllowed } from "../chat/modelCapabilities";
 
 export type CommandCategory =
   | "general"
@@ -129,17 +131,12 @@ export function buildModelCommands(
   onSelect: (model: string) => void,
   close: () => void,
 ): Command[] {
-  const models = [
-    { id: "opus", label: "Opus 4.6 1M" },
-    { id: "claude-opus-4-6", label: "Opus 4.6" },
-    { id: "sonnet", label: "Sonnet 4.6" },
-    { id: "haiku", label: "Haiku 4.5" },
-  ];
-  return models.map((m) => ({
+  return MODELS.map((m) => ({
     id: `model:${m.id}`,
     name: `${m.label}${m.id === selectedModel ? " ✓" : ""}`,
+    description: m.extraUsage ? "Extra usage: 1M context billed at API rates" : undefined,
     category: "agent" as const,
-    icon: Sparkles,
+    icon: m.extraUsage ? BadgeDollarSign : Sparkles,
     keywords: ["model", ...m.label.toLowerCase().split(/\s+/)],
     execute: () => { onSelect(m.id); close(); },
   }));
@@ -157,13 +154,16 @@ export function buildEffortCommands(
     { id: "low", label: "Low", description: "Fast, minimal reasoning" },
     { id: "medium", label: "Medium", description: "Balanced" },
     { id: "high", label: "High", description: "Deep reasoning" },
+    { id: "xhigh", label: "Extra High", description: "Extended reasoning (Opus 4.7+)" },
     { id: "max", label: "Max", description: "Full budget (Opus only)" },
   ];
   const levels = !isEffortSupported(selectedModel)
     ? all.filter((l) => l.id === "auto")
-    : isMaxEffortAllowed(selectedModel)
+    : isXhighEffortAllowed(selectedModel)
       ? all
-      : all.filter((l) => l.id !== "max");
+      : isMaxEffortAllowed(selectedModel)
+        ? all.filter((l) => l.id !== "xhigh")
+        : all.filter((l) => l.id !== "xhigh" && l.id !== "max");
   return levels.map((l) => ({
     id: `effort:${l.id}`,
     name: `${l.label}${l.id === currentEffort ? " ✓" : ""}`,
@@ -265,19 +265,21 @@ export function buildCommands(ctx: CommandContext): Command[] {
       keywords: ["planning", "architect"],
       execute: () => { ctx.setPlanMode(wsId, !ctx.planMode); ctx.close(); },
     });
-    cmds.push({
-      id: "toggle-fast",
-      name: `${ctx.fastMode ? "Disable" : "Enable"} Fast Mode`,
-      category: "agent",
-      icon: Zap,
-      keywords: ["speed", "quick"],
-      execute: () => {
-        const next = !ctx.fastMode;
-        ctx.setFastMode(wsId, next);
-        ctx.persistSetting(`fast_mode:${wsId}`, String(next));
-        ctx.close();
-      },
-    });
+    if (isFastSupported(ctx.selectedModel)) {
+      cmds.push({
+        id: "toggle-fast",
+        name: `${ctx.fastMode ? "Disable" : "Enable"} Fast Mode`,
+        category: "agent",
+        icon: Zap,
+        keywords: ["speed", "quick"],
+        execute: () => {
+          const next = !ctx.fastMode;
+          ctx.setFastMode(wsId, next);
+          ctx.persistSetting(`fast_mode:${wsId}`, String(next));
+          ctx.close();
+        },
+      });
+    }
     cmds.push({
       id: "change-model",
       name: "Change Model",

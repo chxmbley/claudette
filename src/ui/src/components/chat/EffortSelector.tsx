@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { isXhighEffortAllowed, isMaxEffortAllowed } from "./modelCapabilities";
 import styles from "./ModelSelector.module.css";
 
 export const EFFORT_LEVELS = [
@@ -6,27 +7,15 @@ export const EFFORT_LEVELS = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
+  { id: "xhigh", label: "Extra High" },
   { id: "max", label: "Max" },
 ] as const;
 
-/** Models that support effort levels. */
-const EFFORT_SUPPORTED_MODELS = new Set(["opus", "claude-opus-4-6", "sonnet"]);
-
-/** Models that support the "max" effort level (Opus 4.6 only). */
-const MAX_EFFORT_MODELS = new Set(["opus", "claude-opus-4-6"]);
-
-export function isEffortSupported(model: string): boolean {
-  return EFFORT_SUPPORTED_MODELS.has(model);
-}
-
-export function isMaxEffortAllowed(model: string): boolean {
-  return MAX_EFFORT_MODELS.has(model);
-}
-
 /** Return the effort levels available for the given model. */
 function getAvailableLevels(model: string) {
-  if (isMaxEffortAllowed(model)) return EFFORT_LEVELS;
-  return EFFORT_LEVELS.filter((l) => l.id !== "max");
+  if (isXhighEffortAllowed(model)) return EFFORT_LEVELS;
+  if (isMaxEffortAllowed(model)) return EFFORT_LEVELS.filter((l) => l.id !== "xhigh");
+  return EFFORT_LEVELS.filter((l) => l.id !== "xhigh" && l.id !== "max");
 }
 
 interface EffortSelectorProps {
