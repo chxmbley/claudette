@@ -1,9 +1,12 @@
+import React, { createElement } from "react";
 import type { PluggableList } from "unified";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import { AnsiUp } from "ansi_up";
+import { openUrl } from "../services/tauri";
 
 // Shared AnsiUp instance for converting ANSI escape sequences to HTML.
 const ansiUp = new AnsiUp();
@@ -99,3 +102,28 @@ export const REHYPE_PLUGINS: PluggableList = [
   rehypeHighlight,
 ];
 export const REMARK_PLUGINS: PluggableList = [remarkGfm];
+
+// Schemes that should open in the system browser rather than navigate the webview.
+export const EXTERNAL_SCHEMES = /^https?:|^mailto:/i;
+
+// Override <a> to open external links in the system browser instead of navigating the webview.
+export const MARKDOWN_COMPONENTS: Components = {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  a: ({ node, href, children, ...props }) =>
+    createElement(
+      "a",
+      {
+        ...props,
+        href,
+        onClick: (e: React.MouseEvent<HTMLAnchorElement>) => {
+          if (href && EXTERNAL_SCHEMES.test(href)) {
+            e.preventDefault();
+            void openUrl(href).catch((err) =>
+              console.error("Failed to open URL:", href, err),
+            );
+          }
+        },
+      },
+      children,
+    ),
+};

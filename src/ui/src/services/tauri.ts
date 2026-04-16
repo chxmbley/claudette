@@ -378,6 +378,10 @@ export function listUserThemes(): Promise<ThemeDefinition[]> {
   return invoke("list_user_themes");
 }
 
+export function openUrl(url: string): Promise<void> {
+  return invoke("open_url", { url });
+}
+
 export function getGitUsername(): Promise<string | null> {
   return invoke("get_git_username");
 }
