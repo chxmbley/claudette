@@ -1,7 +1,7 @@
 import React, { createContext, memo, useContext, useEffect, useRef, useState, useMemo, useCallback } from "react";
 import Markdown from "react-markdown";
 import { preprocessContent, MARKDOWN_COMPONENTS, REHYPE_PLUGINS, REMARK_PLUGINS } from "../../utils/markdown";
-import { FileText, GitBranch, LayoutDashboard, Plus, RotateCcw, X } from "lucide-react";
+import { FileText, GitBranch, Plus, RotateCcw, X } from "lucide-react";
 import { useAppStore } from "../../stores/useAppStore";
 import type { ToolActivity, CompletedTurn } from "../../stores/useAppStore";
 import {
@@ -151,7 +151,6 @@ export function ChatPanel() {
   useAgentStream();
 
   const defaultBranchesMap = useAppStore((s) => s.defaultBranches);
-  const selectWorkspace = useAppStore((s) => s.selectWorkspace);
 
   const ws = workspaces.find((w) => w.id === selectedWorkspaceId);
   const repo = repositories.find((r) => r.id === ws?.repository_id);
@@ -586,16 +585,6 @@ export function ChatPanel() {
     <div className={styles.panel}>
       <div className={styles.header} data-tauri-drag-region>
         <div className={styles.headerLeft}>
-          <button
-            className={styles.dashboardBtn}
-            onClick={() => !isRunning && selectWorkspace(null)}
-            title={isRunning ? "Stop the agent before navigating away" : "Back to dashboard"}
-            aria-label="Back to dashboard"
-            type="button"
-            disabled={isRunning}
-          >
-            <LayoutDashboard size={14} />
-          </button>
           {repo ? (
             <span className={styles.branchInfo}>
               <span className={styles.repoName}>{repo.name}</span>

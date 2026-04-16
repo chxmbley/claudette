@@ -15,7 +15,7 @@ import {
   pairWithServer,
   startLocalServer,
 } from "../../services/tauri";
-import { Settings, Link, X, Share2, Plus, Globe, Archive, Trash2, BadgeCheck, BadgeInfo, BadgeQuestionMark, Cog, Filter, Check } from "lucide-react";
+import { Settings, Link, X, Share2, Plus, Globe, Archive, Trash2, BadgeCheck, BadgeInfo, BadgeQuestionMark, Cog, Filter, Check, LayoutDashboard } from "lucide-react";
 import { RepoIcon } from "../shared/RepoIcon";
 import { useSpinnerFrame } from "../../hooks/useSpinnerFrame";
 import type { McpStatusSnapshot } from "../../types/mcp";
@@ -220,18 +220,27 @@ export const Sidebar = memo(function Sidebar() {
     <div className={styles.sidebar}>
       <div className={styles.header} data-tauri-drag-region>
         <span className={styles.title}>Workspaces</span>
-        <div className={styles.filterDropdown} ref={filterDropdownRef}>
+        <div className={styles.headerActions}>
           <button
-            className={styles.filterToggle}
-            onClick={() => setFilterMenuOpen((open) => !open)}
-            title="Filter workspaces"
-            aria-label="Filter workspaces"
-            aria-haspopup="menu"
-            aria-expanded={filterMenuOpen}
-            aria-controls="workspace-filter-menu"
+            className={styles.dashboardBtn}
+            onClick={() => selectWorkspace(null)}
+            title="Back to dashboard"
+            aria-label="Back to dashboard"
           >
-            <Filter size={12} />
+            <LayoutDashboard size={12} />
           </button>
+          <div className={styles.filterDropdown} ref={filterDropdownRef}>
+            <button
+              className={styles.filterToggle}
+              onClick={() => setFilterMenuOpen((open) => !open)}
+              title="Filter workspaces"
+              aria-label="Filter workspaces"
+              aria-haspopup="menu"
+              aria-expanded={filterMenuOpen}
+              aria-controls="workspace-filter-menu"
+            >
+              <Filter size={12} />
+            </button>
           {filterMenuOpen && (
             <div className={styles.filterMenu} id="workspace-filter-menu" role="menu">
               <button
@@ -282,6 +291,7 @@ export const Sidebar = memo(function Sidebar() {
               )}
             </div>
           )}
+          </div>
         </div>
       </div>
 

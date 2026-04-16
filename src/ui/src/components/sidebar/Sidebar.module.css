@@ -23,6 +23,30 @@
   letter-spacing: 0.08em;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dashboardBtn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.dashboardBtn:hover {
+  background: var(--hover-bg);
+  color: var(--text-muted);
+}
+
 .filterDropdown {
   position: relative;
 }

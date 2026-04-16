@@ -15,10 +15,6 @@
   box-shadow: var(--shadow-sm);
 }
 
-[data-platform="mac"] .header {
-  padding-left: 78px;
-}
-
 .headerLeft {
   display: flex;
   align-items: center;
