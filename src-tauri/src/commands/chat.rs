@@ -48,6 +48,20 @@ struct AgentStreamPayload {
 
 use claudette::permissions::tools_for_level;
 
+/// Detect whether the persistent session's spawn-time flags have drifted
+/// from what the current turn is asking for. Both `--permission-mode` and
+/// `--allowedTools` are only applied when the `claude` process starts, so
+/// a drift means the running process cannot serve this turn correctly and
+/// must be torn down.
+fn persistent_session_flags_drifted(
+    session_plan_mode: bool,
+    session_allowed_tools: &[String],
+    requested_plan_mode: bool,
+    requested_allowed_tools: &[String],
+) -> bool {
+    session_plan_mode != requested_plan_mode || session_allowed_tools != requested_allowed_tools
+}
+
 #[tauri::command]
 pub async fn load_chat_history(
     workspace_id: String,
@@ -225,6 +239,8 @@ pub async fn send_chat_message(
                 attention_kind: None,
                 persistent_session: None,
                 mcp_config_dirty: false,
+                session_plan_mode: false,
+                session_allowed_tools: Vec::new(),
             };
         }
 
@@ -237,6 +253,8 @@ pub async fn send_chat_message(
             attention_kind: None,
             persistent_session: None,
             mcp_config_dirty: false,
+            session_plan_mode: false,
+            session_allowed_tools: Vec::new(),
         }
     });
 
@@ -263,6 +281,10 @@ pub async fn send_chat_message(
         eprintln!("[chat] MCP config dirty — tearing down persistent session for {workspace_id}");
         let stale_pid = session.persistent_session.as_ref().map(|ps| ps.pid());
         session.persistent_session = None;
+        // Clear active_pid alongside persistent_session so a failed respawn
+        // can't leave the next turn with a stale PID that the kernel may
+        // have recycled (would get SIGKILLed by the stale-process branch).
+        session.active_pid = None;
         session.mcp_config_dirty = false;
         if let Some(pid) = stale_pid {
             drop(agents);
@@ -287,6 +309,43 @@ pub async fn send_chat_message(
         chrome_enabled: chrome_enabled.unwrap_or(false),
         mcp_config,
     };
+
+    // `--permission-mode` and `--allowedTools` are baked into the persistent
+    // `claude` process at spawn — subsequent stdin turns cannot change them.
+    // If the caller's requested values no longer match what the current
+    // process was spawned with, tear it down so the next spawn can apply the
+    // new flags. The common case this fixes: user finishes plan mode, clicks
+    // "Approve plan", and the next turn arrives with `plan_mode=false`.
+    // Without a teardown the process stays in plan mode and every mutating
+    // tool is silently auto-denied.
+    if session.persistent_session.is_some()
+        && persistent_session_flags_drifted(
+            session.session_plan_mode,
+            &session.session_allowed_tools,
+            agent_settings.plan_mode,
+            &allowed_tools,
+        )
+    {
+        eprintln!(
+            "[chat] session flags drifted (plan_mode {} -> {}, allowed_tools changed: {}) — tearing down persistent session for {workspace_id}",
+            session.session_plan_mode,
+            agent_settings.plan_mode,
+            session.session_allowed_tools != allowed_tools,
+        );
+        let stale_pid = session.persistent_session.as_ref().map(|ps| ps.pid());
+        session.persistent_session = None;
+        // Clear active_pid alongside persistent_session. A concurrent turn
+        // streaming this process at drift time would leave active_pid set;
+        // without this clear, a failed respawn + next turn would SIGKILL a
+        // potentially recycled PID via the stale-process teardown branch.
+        session.active_pid = None;
+        if let Some(pid) = stale_pid {
+            drop(agents);
+            let _ = agent::stop_agent_graceful(pid).await;
+            agents = state.agents.write().await;
+        }
+    }
+    let session = agents.get_mut(&workspace_id).ok_or("Session lost")?;
 
     // Expand @-file mentions into inline file content for the agent prompt.
     let prompt = claudette::file_expand::expand_file_mentions(
@@ -384,6 +443,8 @@ pub async fn send_chat_message(
                 let session = agents.get_mut(&workspace_id).ok_or("Session lost")?;
                 session.persistent_session = Some(ps);
                 session.session_id = final_sid;
+                session.session_plan_mode = agent_settings.plan_mode;
+                session.session_allowed_tools = allowed_tools.clone();
                 handle
             }
         }
@@ -446,6 +507,8 @@ pub async fn send_chat_message(
         let session = agents.get_mut(&workspace_id).ok_or("Session lost")?;
         session.persistent_session = Some(ps);
         session.session_id = final_sid.clone();
+        session.session_plan_mode = agent_settings.plan_mode;
+        session.session_allowed_tools = allowed_tools.clone();
         let _ = db.save_agent_session(&workspace_id, &final_sid, session.turn_count);
         handle
     };
@@ -1330,4 +1393,94 @@ fn now_iso() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", dur.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persistent_session_flags_drifted;
+
+    fn s(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    #[test]
+    fn no_drift_when_plan_mode_and_tools_match() {
+        let tools = s(&["Read", "Write"]);
+        assert!(!persistent_session_flags_drifted(
+            false, &tools, false, &tools,
+        ));
+    }
+
+    #[test]
+    fn drift_when_plan_mode_flips_off_after_approval() {
+        // Session was spawned with --permission-mode plan; next turn is not.
+        let tools = s(&["Read", "Write"]);
+        assert!(persistent_session_flags_drifted(
+            true, &tools, false, &tools,
+        ));
+    }
+
+    #[test]
+    fn drift_when_plan_mode_flips_on() {
+        let tools = s(&["Read"]);
+        assert!(persistent_session_flags_drifted(
+            false, &tools, true, &tools,
+        ));
+    }
+
+    #[test]
+    fn drift_when_permission_level_changes() {
+        let before = s(&["Read", "Glob"]);
+        let after = s(&["Read", "Write", "Edit"]);
+        assert!(persistent_session_flags_drifted(
+            false, &before, false, &after,
+        ));
+    }
+
+    #[test]
+    fn drift_when_allowed_tools_reordered() {
+        // Strict equality: a different order counts as drift. Callers build
+        // the list deterministically from the permission level, so any
+        // observed diff signals a real configuration change.
+        assert!(persistent_session_flags_drifted(
+            false,
+            &s(&["Read", "Write"]),
+            false,
+            &s(&["Write", "Read"]),
+        ));
+    }
+
+    #[test]
+    fn no_drift_when_wildcard_unchanged() {
+        // Permission level "full" resolves to the wildcard sentinel; reusing
+        // the same bypass-permissions session should not trigger a respawn.
+        let full = s(&["*"]);
+        assert!(!persistent_session_flags_drifted(
+            false, &full, false, &full,
+        ));
+    }
+
+    #[test]
+    fn drift_when_escalating_to_wildcard() {
+        // Switching from a concrete list ("standard"/"readonly") up to "full"
+        // needs a respawn so `build_claude_args` can apply
+        // `--permission-mode bypassPermissions`.
+        let standard = s(&["Read", "Write", "Edit"]);
+        let full = s(&["*"]);
+        assert!(persistent_session_flags_drifted(
+            false, &standard, false, &full,
+        ));
+    }
+
+    #[test]
+    fn drift_when_demoting_from_wildcard() {
+        // Dropping from "full" back to a concrete list needs a respawn so
+        // the bypass-permissions mode is cleared and `--allowedTools` is
+        // constrained.
+        let full = s(&["*"]);
+        let readonly = s(&["Read", "Glob", "Grep"]);
+        assert!(persistent_session_flags_drifted(
+            false, &full, false, &readonly,
+        ));
+    }
 }
