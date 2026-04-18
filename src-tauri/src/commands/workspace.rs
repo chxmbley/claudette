@@ -10,6 +10,7 @@ use claudette::agent;
 use claudette::config;
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
+use claudette::fork::{self, ForkInputs};
 use claudette::git;
 use claudette::mcp_supervisor::McpSupervisor;
 use claudette::model::{AgentStatus, Workspace, WorkspaceStatus};
@@ -124,7 +125,7 @@ pub async fn create_workspace(
         id: uuid::Uuid::new_v4().to_string(),
         repository_id: repo_id,
         name,
-        branch_name,
+        branch_name: branch_name.clone(),
         worktree_path: Some(actual_path.clone()),
         status: WorkspaceStatus::Active,
         agent_status: AgentStatus::Idle,
@@ -132,7 +133,13 @@ pub async fn create_workspace(
         created_at: now_iso(),
     };
 
-    db.insert_workspace(&ws).map_err(|e| e.to_string())?;
+    // If the DB insert fails, roll back the worktree + branch we just created
+    // so we don't leave orphan git state pointing to nothing.
+    if let Err(e) = db.insert_workspace(&ws) {
+        let _ = git::remove_worktree(&repo_path, &actual_path, true).await;
+        let _ = git::branch_delete(&repo_path, &branch_name).await;
+        return Err(e.to_string());
+    }
 
     // Resolve and execute setup script (unless caller requested skip).
     let setup_result = if skip_setup.unwrap_or(false) {
@@ -152,6 +159,50 @@ pub async fn create_workspace(
     Ok(CreateWorkspaceResult {
         workspace: ws,
         setup_result,
+    })
+}
+
+#[derive(Serialize)]
+pub struct ForkWorkspaceResult {
+    pub workspace: Workspace,
+    /// Whether the Claude session JSONL was copied so the fork can `--resume`
+    /// its conversation history. When `false`, the fork starts a fresh session.
+    pub session_resumed: bool,
+}
+
+#[tauri::command]
+pub async fn fork_workspace_at_checkpoint(
+    workspace_id: String,
+    checkpoint_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ForkWorkspaceResult, String> {
+    let mut db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
+
+    let (prefix_mode, prefix_custom) = read_branch_prefix_settings(&db);
+    let prefix = resolve_branch_prefix(&prefix_mode, &prefix_custom).await;
+
+    let worktree_base = state.worktree_base_dir.read().await.clone();
+
+    let outcome = fork::fork_workspace_at_checkpoint(
+        &mut db,
+        ForkInputs {
+            source_workspace_id: &workspace_id,
+            checkpoint_id: &checkpoint_id,
+            worktree_base: worktree_base.as_path(),
+            branch_prefix: &prefix,
+            db_path: state.db_path.as_path(),
+            now_iso,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    crate::tray::rebuild_tray(&app);
+
+    Ok(ForkWorkspaceResult {
+        workspace: outcome.workspace,
+        session_resumed: outcome.session_resumed,
     })
 }
 
