@@ -48,18 +48,40 @@ struct AgentStreamPayload {
 
 use claudette::permissions::tools_for_level;
 
+/// Spawn-time flags of the currently running persistent session, plus the
+/// backend-observed `exited_plan` latch (set when the agent emits
+/// `ExitPlanMode` during this session).
+struct SessionFlags<'a> {
+    plan_mode: bool,
+    allowed_tools: &'a [String],
+    exited_plan: bool,
+}
+
+/// Flags the next turn is asking for. Compared against [`SessionFlags`] to
+/// decide whether the process must be torn down and respawned.
+struct RequestedFlags<'a> {
+    plan_mode: bool,
+    allowed_tools: &'a [String],
+}
+
 /// Detect whether the persistent session's spawn-time flags have drifted
 /// from what the current turn is asking for. Both `--permission-mode` and
 /// `--allowedTools` are only applied when the `claude` process starts, so
 /// a drift means the running process cannot serve this turn correctly and
 /// must be torn down.
+///
+/// `exited_plan` is a backend-observed signal that the agent called
+/// `ExitPlanMode` during the current session. When set alongside
+/// `plan_mode`, the plan phase is over regardless of whether the frontend
+/// remembered to send `plan_mode=false` — force a teardown so the CLI
+/// respawns without `--permission-mode plan`.
 fn persistent_session_flags_drifted(
-    session_plan_mode: bool,
-    session_allowed_tools: &[String],
-    requested_plan_mode: bool,
-    requested_allowed_tools: &[String],
+    session: SessionFlags<'_>,
+    requested: RequestedFlags<'_>,
 ) -> bool {
-    session_plan_mode != requested_plan_mode || session_allowed_tools != requested_allowed_tools
+    session.plan_mode != requested.plan_mode
+        || session.allowed_tools != requested.allowed_tools
+        || (session.plan_mode && session.exited_plan)
 }
 
 #[tauri::command]
@@ -242,6 +264,7 @@ pub async fn send_chat_message(
                 session_plan_mode: false,
                 session_allowed_tools: Vec::new(),
                 pending_permissions: std::collections::HashMap::new(),
+                session_exited_plan: false,
             };
         }
 
@@ -257,6 +280,7 @@ pub async fn send_chat_message(
             session_plan_mode: false,
             session_allowed_tools: Vec::new(),
             pending_permissions: std::collections::HashMap::new(),
+            session_exited_plan: false,
         }
     });
 
@@ -347,17 +371,23 @@ pub async fn send_chat_message(
     // tool is silently auto-denied.
     if session.persistent_session.is_some()
         && persistent_session_flags_drifted(
-            session.session_plan_mode,
-            &session.session_allowed_tools,
-            agent_settings.plan_mode,
-            &allowed_tools,
+            SessionFlags {
+                plan_mode: session.session_plan_mode,
+                allowed_tools: &session.session_allowed_tools,
+                exited_plan: session.session_exited_plan,
+            },
+            RequestedFlags {
+                plan_mode: agent_settings.plan_mode,
+                allowed_tools: &allowed_tools,
+            },
         )
     {
         eprintln!(
-            "[chat] session flags drifted (plan_mode {} -> {}, allowed_tools changed: {}) — tearing down persistent session for {workspace_id}",
+            "[chat] session flags drifted (plan_mode {} -> {}, allowed_tools changed: {}, exited_plan: {}) — tearing down persistent session for {workspace_id}",
             session.session_plan_mode,
             agent_settings.plan_mode,
             session.session_allowed_tools != allowed_tools,
+            session.session_exited_plan,
         );
         // Resolve any pending permission requests against the doomed process
         // before we kill it, so the next turn doesn't carry stale tool_use_ids.
@@ -369,6 +399,11 @@ pub async fn send_chat_message(
         // without this clear, a failed respawn + next turn would SIGKILL a
         // potentially recycled PID via the stale-process teardown branch.
         session.active_pid = None;
+        // The spawn-completion sites below also clear this alongside
+        // `session_plan_mode`; resetting here too documents that drift-driven
+        // teardown ends the plan observation at the teardown point, not the
+        // respawn point.
+        session.session_exited_plan = false;
         if stale_pid.is_some() || to_deny_drift.is_some() {
             drop(agents);
             if let Some((ref ps, drained)) = to_deny_drift {
@@ -480,6 +515,11 @@ pub async fn send_chat_message(
                 session.session_id = final_sid;
                 session.session_plan_mode = agent_settings.plan_mode;
                 session.session_allowed_tools = allowed_tools.clone();
+                // Fresh process — any prior ExitPlanMode observation belongs
+                // to the dead session. Keep this in lockstep with the
+                // spawn-time flags above so the latch can't leak across
+                // respawns (including paths that skip the drift branch).
+                session.session_exited_plan = false;
                 handle
             }
         }
@@ -544,6 +584,8 @@ pub async fn send_chat_message(
         session.session_id = final_sid.clone();
         session.session_plan_mode = agent_settings.plan_mode;
         session.session_allowed_tools = allowed_tools.clone();
+        // See the sibling reset above — fresh process, fresh latch.
+        session.session_exited_plan = false;
         let _ = db.save_agent_session(&workspace_id, &final_sid, session.turn_count);
         handle
     };
@@ -720,6 +762,12 @@ pub async fn send_chat_message(
                 if let Some(session) = agents.get_mut(&ws_id) {
                     session.needs_attention = true;
                     session.attention_kind = Some(kind);
+                    // Observed ExitPlanMode — the plan phase is ending. Mark
+                    // so the next turn forces a subprocess teardown even if
+                    // the frontend fails to flip `plan_mode=false`.
+                    if name == "ExitPlanMode" {
+                        session.session_exited_plan = true;
+                    }
                 }
                 drop(agents);
                 // Only send notification once per attention cycle — skip if
@@ -1699,17 +1747,37 @@ fn now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::persistent_session_flags_drifted;
+    use super::{RequestedFlags, SessionFlags, persistent_session_flags_drifted};
 
     fn s(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    fn session<'a>(
+        plan_mode: bool,
+        allowed_tools: &'a [String],
+        exited_plan: bool,
+    ) -> SessionFlags<'a> {
+        SessionFlags {
+            plan_mode,
+            allowed_tools,
+            exited_plan,
+        }
+    }
+
+    fn requested<'a>(plan_mode: bool, allowed_tools: &'a [String]) -> RequestedFlags<'a> {
+        RequestedFlags {
+            plan_mode,
+            allowed_tools,
+        }
     }
 
     #[test]
     fn no_drift_when_plan_mode_and_tools_match() {
         let tools = s(&["Read", "Write"]);
         assert!(!persistent_session_flags_drifted(
-            false, &tools, false, &tools,
+            session(false, &tools, false),
+            requested(false, &tools),
         ));
     }
 
@@ -1718,7 +1786,8 @@ mod tests {
         // Session was spawned with --permission-mode plan; next turn is not.
         let tools = s(&["Read", "Write"]);
         assert!(persistent_session_flags_drifted(
-            true, &tools, false, &tools,
+            session(true, &tools, false),
+            requested(false, &tools),
         ));
     }
 
@@ -1726,7 +1795,8 @@ mod tests {
     fn drift_when_plan_mode_flips_on() {
         let tools = s(&["Read"]);
         assert!(persistent_session_flags_drifted(
-            false, &tools, true, &tools,
+            session(false, &tools, false),
+            requested(true, &tools),
         ));
     }
 
@@ -1735,7 +1805,8 @@ mod tests {
         let before = s(&["Read", "Glob"]);
         let after = s(&["Read", "Write", "Edit"]);
         assert!(persistent_session_flags_drifted(
-            false, &before, false, &after,
+            session(false, &before, false),
+            requested(false, &after),
         ));
     }
 
@@ -1744,11 +1815,11 @@ mod tests {
         // Strict equality: a different order counts as drift. Callers build
         // the list deterministically from the permission level, so any
         // observed diff signals a real configuration change.
+        let before = s(&["Read", "Write"]);
+        let after = s(&["Write", "Read"]);
         assert!(persistent_session_flags_drifted(
-            false,
-            &s(&["Read", "Write"]),
-            false,
-            &s(&["Write", "Read"]),
+            session(false, &before, false),
+            requested(false, &after),
         ));
     }
 
@@ -1758,7 +1829,8 @@ mod tests {
         // the same bypass-permissions session should not trigger a respawn.
         let full = s(&["*"]);
         assert!(!persistent_session_flags_drifted(
-            false, &full, false, &full,
+            session(false, &full, false),
+            requested(false, &full),
         ));
     }
 
@@ -1770,7 +1842,8 @@ mod tests {
         let standard = s(&["Read", "Write", "Edit"]);
         let full = s(&["*"]);
         assert!(persistent_session_flags_drifted(
-            false, &standard, false, &full,
+            session(false, &standard, false),
+            requested(false, &full),
         ));
     }
 
@@ -1782,7 +1855,32 @@ mod tests {
         let full = s(&["*"]);
         let readonly = s(&["Read", "Glob", "Grep"]);
         assert!(persistent_session_flags_drifted(
-            false, &full, false, &readonly,
+            session(false, &full, false),
+            requested(false, &readonly),
+        ));
+    }
+
+    #[test]
+    fn drift_when_session_exited_plan_even_if_request_still_says_plan() {
+        // Safety net: agent emitted ExitPlanMode so the plan phase is over.
+        // Even if the frontend forgets to flip plan_mode=false on the next
+        // turn (known bug class), the backend must still respawn so the CLI
+        // no longer auto-denies mutating tools.
+        let tools = s(&["Read", "Write"]);
+        assert!(persistent_session_flags_drifted(
+            session(true, &tools, true),
+            requested(true, &tools),
+        ));
+    }
+
+    #[test]
+    fn no_drift_when_exited_plan_but_session_never_had_plan() {
+        // Nonsense state defensively handled: if session_plan_mode is false
+        // the exited-plan flag is irrelevant and should not trigger drift.
+        let tools = s(&["Read"]);
+        assert!(!persistent_session_flags_drifted(
+            session(false, &tools, true),
+            requested(false, &tools),
         ));
     }
 }

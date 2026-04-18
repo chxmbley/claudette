@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { useAppStore } from "./useAppStore";
 import type { AgentQuestion } from "./useAppStore";
 import type { ConversationCheckpoint } from "../types/checkpoint";
+import { applyPlanModeMountDefault } from "../components/chat/applyPlanModeMountDefault";
 
 const WS_ID = "test-workspace";
 
@@ -273,6 +274,33 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
 
     expect(useAppStore.getState().agentQuestions["ws-a"]).toEqual(qa);
     expect(useAppStore.getState().agentQuestions["ws-b"]).toEqual(qb);
+  });
+});
+
+describe("applyPlanModeMountDefault", () => {
+  // ChatToolbar delegates its mount-time "apply global default" step to this
+  // helper. The contract: only touch the store if the runtime value is
+  // undefined; a remount (workspace swap, remote reconnect, HMR) must not
+  // clobber an agent-driven clear of planMode.
+  beforeEach(() => {
+    useAppStore.setState({ planMode: {} });
+  });
+
+  it("applies default when store has no runtime value", () => {
+    applyPlanModeMountDefault(WS_ID, true);
+    expect(useAppStore.getState().planMode[WS_ID]).toBe(true);
+  });
+
+  it("preserves existing false runtime value on remount", () => {
+    useAppStore.getState().setPlanMode(WS_ID, false);
+    applyPlanModeMountDefault(WS_ID, true);
+    expect(useAppStore.getState().planMode[WS_ID]).toBe(false);
+  });
+
+  it("preserves existing true runtime value on remount", () => {
+    useAppStore.getState().setPlanMode(WS_ID, true);
+    applyPlanModeMountDefault(WS_ID, false);
+    expect(useAppStore.getState().planMode[WS_ID]).toBe(true);
   });
 });
 
