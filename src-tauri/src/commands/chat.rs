@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use claudette::agent::{
-    self, AgentEvent, AgentSettings, ImageAttachment, InnerStreamEvent, PersistentSession,
-    StartContentBlock, StreamEvent,
+    self, AgentEvent, AgentSettings, ControlRequestInner, ImageAttachment, InnerStreamEvent,
+    PersistentSession, StartContentBlock, StreamEvent,
 };
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
@@ -17,7 +17,7 @@ use claudette::model::{
 use claudette::snapshot;
 use claudette::{base64_decode, base64_encode};
 
-use crate::state::{AgentSessionState, AppState};
+use crate::state::{AgentSessionState, AppState, PendingPermission};
 
 /// Frontend-facing input for an image attachment (base64-encoded).
 #[derive(Clone, Deserialize)]
@@ -241,6 +241,7 @@ pub async fn send_chat_message(
                 mcp_config_dirty: false,
                 session_plan_mode: false,
                 session_allowed_tools: Vec::new(),
+                pending_permissions: std::collections::HashMap::new(),
             };
         }
 
@@ -255,8 +256,16 @@ pub async fn send_chat_message(
             mcp_config_dirty: false,
             session_plan_mode: false,
             session_allowed_tools: Vec::new(),
+            pending_permissions: std::collections::HashMap::new(),
         }
     });
+
+    // Clear any unresolved permission requests so the CLI doesn't hang when
+    // we send the next turn. This replaces the old behaviour where the
+    // AgentQuestionCard dismissed on a new user message — the CLI is actually
+    // blocked mid-turn and needs an explicit control_response. The drain is
+    // synchronous (under the lock); the deny sends happen after we drop it.
+    let to_deny_new_turn = drain_pending_permissions(session);
 
     // If a previous turn is still running and there's no persistent session,
     // stop the stale process. With a persistent session, the process is shared
@@ -266,11 +275,22 @@ pub async fn send_chat_message(
     {
         eprintln!("[chat] Stopping stale process {old_pid} before new turn");
         drop(agents); // release lock while waiting
+        if let Some((ref ps, drained)) = to_deny_new_turn {
+            deny_drained_permissions(drained, ps, "User sent a new message instead of answering.")
+                .await;
+        }
         let _ = agent::stop_agent(old_pid).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         agents = state.agents.write().await;
         let session = agents.get_mut(&workspace_id).ok_or("Session lost")?;
         session.active_pid = None;
+    } else if let Some((ref ps, drained)) = to_deny_new_turn {
+        // No stale-pid teardown — release the lock just for the deny sends,
+        // then re-acquire so the rest of this function can mutate the session.
+        drop(agents);
+        deny_drained_permissions(drained, ps, "User sent a new message instead of answering.")
+            .await;
+        agents = state.agents.write().await;
     }
     let session = agents.get_mut(&workspace_id).ok_or("Session lost")?;
 
@@ -279,6 +299,7 @@ pub async fn send_chat_message(
     // The session is idle between turns so a graceful SIGTERM is sufficient.
     if session.mcp_config_dirty {
         eprintln!("[chat] MCP config dirty — tearing down persistent session for {workspace_id}");
+        let to_deny_mcp = drain_pending_permissions(session);
         let stale_pid = session.persistent_session.as_ref().map(|ps| ps.pid());
         session.persistent_session = None;
         // Clear active_pid alongside persistent_session so a failed respawn
@@ -286,9 +307,15 @@ pub async fn send_chat_message(
         // have recycled (would get SIGKILLed by the stale-process branch).
         session.active_pid = None;
         session.mcp_config_dirty = false;
-        if let Some(pid) = stale_pid {
+        if stale_pid.is_some() || to_deny_mcp.is_some() {
             drop(agents);
-            let _ = agent::stop_agent_graceful(pid).await;
+            if let Some((ref ps, drained)) = to_deny_mcp {
+                deny_drained_permissions(drained, ps, "Session restarted with new MCP config.")
+                    .await;
+            }
+            if let Some(pid) = stale_pid {
+                let _ = agent::stop_agent_graceful(pid).await;
+            }
             agents = state.agents.write().await;
         }
     }
@@ -332,6 +359,9 @@ pub async fn send_chat_message(
             agent_settings.plan_mode,
             session.session_allowed_tools != allowed_tools,
         );
+        // Resolve any pending permission requests against the doomed process
+        // before we kill it, so the next turn doesn't carry stale tool_use_ids.
+        let to_deny_drift = drain_pending_permissions(session);
         let stale_pid = session.persistent_session.as_ref().map(|ps| ps.pid());
         session.persistent_session = None;
         // Clear active_pid alongside persistent_session. A concurrent turn
@@ -339,9 +369,14 @@ pub async fn send_chat_message(
         // without this clear, a failed respawn + next turn would SIGKILL a
         // potentially recycled PID via the stale-process teardown branch.
         session.active_pid = None;
-        if let Some(pid) = stale_pid {
+        if stale_pid.is_some() || to_deny_drift.is_some() {
             drop(agents);
-            let _ = agent::stop_agent_graceful(pid).await;
+            if let Some((ref ps, drained)) = to_deny_drift {
+                deny_drained_permissions(drained, ps, "Session restarted with new flags.").await;
+            }
+            if let Some(pid) = stale_pid {
+                let _ = agent::stop_agent_graceful(pid).await;
+            }
             agents = state.agents.write().await;
         }
     }
@@ -592,6 +627,73 @@ pub async fn send_chat_message(
                 && subtype == "init"
             {
                 got_init = true;
+            }
+
+            // Handle control_request: can_use_tool from the CLI's stdio permission
+            // prompt protocol. For AskUserQuestion / ExitPlanMode we remember the
+            // request and emit `agent-permission-prompt` so the UI shows the card
+            // ONLY after the Rust side is ready to receive the answer — the
+            // previous content_block_stop-driven approach raced the still-
+            // in-flight control_request and produced "No pending permission
+            // request" errors when the user clicked too quickly.
+            // For every OTHER tool, immediately deny — Claudette relies on
+            // --allowedTools for normal approvals, so reaching this path means
+            // a plan-mode or unknown-tool block we should report to the model.
+            if let AgentEvent::Stream(StreamEvent::ControlRequest {
+                request_id,
+                request:
+                    ControlRequestInner::CanUseTool {
+                        tool_name,
+                        tool_use_id,
+                        input,
+                    },
+            }) = &event
+            {
+                if matches!(tool_name.as_str(), "AskUserQuestion" | "ExitPlanMode") {
+                    let app_state = app.state::<AppState>();
+                    let mut agents = app_state.agents.write().await;
+                    if let Some(session) = agents.get_mut(&ws_id) {
+                        session.pending_permissions.insert(
+                            tool_use_id.clone(),
+                            PendingPermission {
+                                request_id: request_id.clone(),
+                                tool_name: tool_name.clone(),
+                                original_input: input.clone(),
+                            },
+                        );
+                    }
+                    drop(agents);
+                    let payload = serde_json::json!({
+                        "workspace_id": &ws_id,
+                        "tool_use_id": tool_use_id,
+                        "tool_name": tool_name,
+                        "input": input,
+                    });
+                    let _ = app.emit("agent-permission-prompt", &payload);
+                } else {
+                    // Auto-deny any other tool that reaches the permission-prompt
+                    // path — current Claudette behaviour is no interactive approval
+                    // beyond the question/plan cards. Sending a structured deny
+                    // unblocks the CLI turn instead of hanging.
+                    let app_state = app.state::<AppState>();
+                    let agents = app_state.agents.read().await;
+                    let ps = agents
+                        .get(&ws_id)
+                        .and_then(|s| s.persistent_session.clone());
+                    drop(agents);
+                    if let Some(ps) = ps {
+                        let msg = format!(
+                            "Permission for {tool_name} is not granted in this Claudette session."
+                        );
+                        let deny = serde_json::json!({
+                            "behavior": "deny",
+                            "message": msg,
+                        });
+                        if let Err(e) = ps.send_control_response(request_id, deny).await {
+                            eprintln!("[chat] Failed to auto-deny {tool_name}: {e}");
+                        }
+                    }
+                }
             }
 
             // Detect tool calls that require user input (question, plan approval).
@@ -924,18 +1026,30 @@ pub async fn stop_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut agents = state.agents.write().await;
-    if let Some(session) = agents.get_mut(&workspace_id) {
-        // Clear persistent session and reset session state so the next
-        // turn starts completely fresh (not --resume with a stale ID).
-        session.persistent_session = None;
-        session.turn_count = 0;
-        session.session_id = String::new();
-        if let Some(pid) = session.active_pid.take() {
-            agent::stop_agent(pid).await?;
+    // Drain pending permissions and snapshot the cleanup state synchronously
+    // under the lock; deny sends + the kill happen after we release it.
+    let (to_deny_stop, pid_to_kill) = {
+        let mut agents = state.agents.write().await;
+        match agents.get_mut(&workspace_id) {
+            Some(session) => {
+                let drained = drain_pending_permissions(session);
+                // Clear persistent session and reset session state so the next
+                // turn starts completely fresh (not --resume with a stale ID).
+                session.persistent_session = None;
+                session.turn_count = 0;
+                session.session_id = String::new();
+                (drained, session.active_pid.take())
+            }
+            None => (None, None),
         }
+    };
+
+    if let Some((ref ps, drained)) = to_deny_stop {
+        deny_drained_permissions(drained, ps, "Session stopped by user.").await;
     }
-    drop(agents);
+    if let Some(pid) = pid_to_kill {
+        agent::stop_agent(pid).await?;
+    }
 
     // Clear persisted session from DB too.
     let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
@@ -965,9 +1079,19 @@ pub async fn reset_agent_session(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut agents = state.agents.write().await;
-    agents.remove(&workspace_id);
-    drop(agents);
+    // Drain pending permissions under the lock; deny sends happen after release.
+    let to_deny_reset = {
+        let mut agents = state.agents.write().await;
+        let drained = agents
+            .get_mut(&workspace_id)
+            .and_then(drain_pending_permissions);
+        agents.remove(&workspace_id);
+        drained
+    };
+
+    if let Some((ref ps, drained)) = to_deny_reset {
+        deny_drained_permissions(drained, ps, "Session reset.").await;
+    }
 
     // Clear persisted session so the next turn starts fresh.
     let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
@@ -1250,6 +1374,184 @@ pub async fn clear_attention(
         crate::tray::rebuild_tray(&app);
     }
     Ok(())
+}
+
+/// Resolve a pending AskUserQuestion `can_use_tool` request with the user's
+/// answers. `answers` is keyed by question text (matching the CLI's
+/// `mapToolResultToToolResultBlockParam` expectation) and layered onto the
+/// original tool input as `updatedInput`. The CLI then runs the tool's
+/// `call(updatedInput)` which produces the real tool_result.
+#[tauri::command]
+pub async fn submit_agent_answer(
+    workspace_id: String,
+    tool_use_id: String,
+    answers: std::collections::HashMap<String, String>,
+    annotations: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Validate everything BEFORE removing the pending entry: if the session
+    // has been torn down or the entry maps to the wrong tool, the entry must
+    // stay so the user (or the correct submit_* command) can still see it.
+    let (pending, ps) = {
+        let mut agents = state.agents.write().await;
+        let session = agents.get_mut(&workspace_id).ok_or("Session not found")?;
+        // 1. Persistent session must be alive — otherwise nobody is reading
+        //    stdin and the response would be discarded.
+        let ps = session
+            .persistent_session
+            .clone()
+            .ok_or("Agent session is not active")?;
+        // 2. Tool kind must match — peek by reference.
+        match session.pending_permissions.get(&tool_use_id) {
+            None => {
+                let pending_ids: Vec<String> =
+                    session.pending_permissions.keys().cloned().collect();
+                return Err(format!(
+                    "No pending permission request for tool_use_id {tool_use_id} (pending: {pending_ids:?})"
+                ));
+            }
+            Some(p) if p.tool_name != "AskUserQuestion" => {
+                return Err(format!(
+                    "Pending tool for {tool_use_id} is {}, not AskUserQuestion",
+                    p.tool_name
+                ));
+            }
+            _ => {}
+        }
+        // 3. All checks passed — now it is safe to remove.
+        let pending = session
+            .pending_permissions
+            .remove(&tool_use_id)
+            .expect("checked above");
+        (pending, ps)
+    };
+
+    // Layer answers (and annotations, if any) onto the original input.
+    let mut updated_input = pending.original_input.clone();
+    if !updated_input.is_object() {
+        updated_input = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(obj) = updated_input.as_object_mut() {
+        let answers_value =
+            serde_json::to_value(&answers).map_err(|e| format!("Failed to encode answers: {e}"))?;
+        obj.insert("answers".to_string(), answers_value);
+        if let Some(ann) = annotations {
+            obj.insert("annotations".to_string(), ann);
+        }
+    }
+
+    let response = serde_json::json!({
+        "behavior": "allow",
+        "updatedInput": updated_input,
+    });
+    ps.send_control_response(&pending.request_id, response)
+        .await
+}
+
+/// Resolve a pending ExitPlanMode `can_use_tool` request.
+/// `approved=true` → allow with the model's original input (the CLI's
+/// `call()` will save the plan and emit the real tool_result).
+/// `approved=false` → deny with the given reason (or a sensible default).
+#[tauri::command]
+pub async fn submit_plan_approval(
+    workspace_id: String,
+    tool_use_id: String,
+    approved: bool,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Same validate-before-remove pattern as submit_agent_answer — see that
+    // function for the rationale.
+    let (pending, ps) = {
+        let mut agents = state.agents.write().await;
+        let session = agents.get_mut(&workspace_id).ok_or("Session not found")?;
+        let ps = session
+            .persistent_session
+            .clone()
+            .ok_or("Agent session is not active")?;
+        match session.pending_permissions.get(&tool_use_id) {
+            None => {
+                let pending_ids: Vec<String> =
+                    session.pending_permissions.keys().cloned().collect();
+                return Err(format!(
+                    "No pending permission request for tool_use_id {tool_use_id} (pending: {pending_ids:?})"
+                ));
+            }
+            Some(p) if p.tool_name != "ExitPlanMode" => {
+                return Err(format!(
+                    "Pending tool for {tool_use_id} is {}, not ExitPlanMode",
+                    p.tool_name
+                ));
+            }
+            _ => {}
+        }
+        let pending = session
+            .pending_permissions
+            .remove(&tool_use_id)
+            .expect("checked above");
+        (pending, ps)
+    };
+
+    let response = if approved {
+        serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": pending.original_input,
+        })
+    } else {
+        serde_json::json!({
+            "behavior": "deny",
+            "message": reason.unwrap_or_else(|| "Plan denied. Please revise the approach.".into()),
+        })
+    };
+    ps.send_control_response(&pending.request_id, response)
+        .await
+}
+
+/// Synchronously drain any pending permission requests from `session` and
+/// snapshot the [`PersistentSession`] needed to deny them. Designed to be
+/// called while holding the agents write lock — does no async work itself.
+///
+/// Returns `None` when there is nothing to do (no pending entries) or when
+/// there is no live `PersistentSession` to receive the denies (entries are
+/// dropped in that case, since nobody could read the response anyway).
+fn drain_pending_permissions(
+    session: &mut AgentSessionState,
+) -> Option<(Arc<PersistentSession>, Vec<PendingPermission>)> {
+    if session.pending_permissions.is_empty() {
+        return None;
+    }
+    let Some(ps) = session.persistent_session.clone() else {
+        session.pending_permissions.clear();
+        return None;
+    };
+    let drained: Vec<PendingPermission> = session
+        .pending_permissions
+        .drain()
+        .map(|(_, p)| p)
+        .collect();
+    Some((ps, drained))
+}
+
+/// Send a deny `control_response` for each drained permission. Caller must
+/// have already released the agents lock — this performs async I/O against
+/// the CLI's stdin and would otherwise serialize all other agent-state ops.
+async fn deny_drained_permissions(
+    drained: Vec<PendingPermission>,
+    ps: &PersistentSession,
+    reason: &str,
+) {
+    for pending in drained {
+        let deny = serde_json::json!({
+            "behavior": "deny",
+            "message": reason,
+        });
+        if let Err(e) = ps.send_control_response(&pending.request_id, deny).await {
+            eprintln!(
+                "[chat] Failed to deny pending {} on cleanup: {e}",
+                pending.tool_name
+            );
+        }
+    }
 }
 
 /// Load attachment metadata for a workspace's chat history.
