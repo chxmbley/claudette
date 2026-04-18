@@ -497,9 +497,12 @@ export function readPlanFile(path: string): Promise<string> {
 
 // -- Diff --
 
+import type { DiffLayer, StagedDiffFiles } from "../types/diff";
+
 export interface DiffFilesResult {
   files: DiffFile[];
   merge_base: string;
+  staged_files?: StagedDiffFiles | null;
 }
 
 export function loadDiffFiles(workspaceId: string): Promise<DiffFilesResult> {
@@ -509,9 +512,15 @@ export function loadDiffFiles(workspaceId: string): Promise<DiffFilesResult> {
 export function loadFileDiff(
   worktreePath: string,
   mergeBase: string,
-  filePath: string
+  filePath: string,
+  diffLayer?: DiffLayer,
 ): Promise<FileDiff> {
-  return invoke("load_file_diff", { worktreePath, mergeBase, filePath });
+  return invoke("load_file_diff", {
+    worktreePath,
+    mergeBase,
+    filePath,
+    diffLayer: diffLayer ?? null,
+  });
 }
 
 export function revertFile(
@@ -718,6 +727,47 @@ export function openUsageSettings(): Promise<void> {
 
 export function openReleaseNotes(): Promise<void> {
   return invoke("open_release_notes");
+}
+
+// -- SCM Plugins --
+
+import type { PluginInfo, ScmDetail, PullRequest } from "../types/plugin";
+
+export function listScmProviders(): Promise<PluginInfo[]> {
+  return invoke("list_scm_providers");
+}
+
+export function getScmProvider(repoId: string): Promise<string | null> {
+  return invoke("get_scm_provider", { repoId });
+}
+
+export function setScmProvider(repoId: string, pluginName: string): Promise<void> {
+  return invoke("set_scm_provider", { repoId, pluginName });
+}
+
+export function loadScmDetail(workspaceId: string): Promise<ScmDetail> {
+  return invoke("load_scm_detail", { workspaceId });
+}
+
+export function scmCreatePr(
+  workspaceId: string,
+  title: string,
+  body: string,
+  base: string,
+  draft: boolean
+): Promise<PullRequest> {
+  return invoke("scm_create_pr", { workspaceId, title, body, base, draft });
+}
+
+export function scmMergePr(
+  workspaceId: string,
+  prNumber: number
+): Promise<unknown> {
+  return invoke("scm_merge_pr", { workspaceId, prNumber });
+}
+
+export function scmRefresh(workspaceId: string): Promise<ScmDetail> {
+  return invoke("scm_refresh", { workspaceId });
 }
 
 // -- Debug (dev builds only) --

@@ -1,0 +1,56 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  height: 47px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  background: var(--chat-header-bg);
+  border-bottom: 1px solid var(--divider);
+  box-shadow: var(--shadow-sm);
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.prPill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 3px 8px;
+  font-family: inherit;
+  color: inherit;
+  transition: background 0.15s ease;
+}
+
+.prPill:hover {
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.prNumber {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.externalIcon {
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.statusText {
+  font-size: 12px;
+  font-weight: 500;
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

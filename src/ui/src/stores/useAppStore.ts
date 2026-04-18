@@ -185,12 +185,14 @@ interface AppState {
   diffFiles: DiffFile[];
   diffMergeBase: string | null;
   diffSelectedFile: string | null;
+  diffSelectedLayer: import("../types/diff").DiffLayer | null;
+  diffStagedFiles: import("../types/diff").StagedDiffFiles | null;
   diffContent: FileDiff | null;
   diffViewMode: DiffViewMode;
   diffLoading: boolean;
   diffError: string | null;
-  setDiffFiles: (files: DiffFile[], mergeBase: string) => void;
-  setDiffSelectedFile: (path: string | null) => void;
+  setDiffFiles: (files: DiffFile[], mergeBase: string, stagedFiles?: import("../types/diff").StagedDiffFiles | null) => void;
+  setDiffSelectedFile: (path: string | null, layer?: import("../types/diff").DiffLayer | null) => void;
   setDiffContent: (content: FileDiff | null) => void;
   setDiffViewMode: (mode: DiffViewMode) => void;
   setDiffLoading: (loading: boolean) => void;
@@ -215,6 +217,14 @@ interface AppState {
   ) => void;
   updateTerminalTabPtyId: (tabId: number, ptyId: number) => void;
 
+  // -- SCM --
+  scmSummary: Record<string, import("../types/plugin").ScmSummary>;
+  scmDetail: import("../types/plugin").ScmDetail | null;
+  scmDetailLoading: boolean;
+  setScmSummary: (wsId: string, summary: import("../types/plugin").ScmSummary) => void;
+  setScmDetail: (detail: import("../types/plugin").ScmDetail | null) => void;
+  setScmDetailLoading: (loading: boolean) => void;
+
   // -- UI --
   metaKeyHeld: boolean;
   setMetaKeyHeld: (held: boolean) => void;
@@ -223,14 +233,14 @@ interface AppState {
   sidebarWidth: number;
   rightSidebarWidth: number;
   terminalHeight: number;
-  rightSidebarTab: "changes" | "tasks";
+  rightSidebarTab: "changes" | "tasks" | "scm";
   sidebarFilter: "all" | "active" | "archived" | "remote";
   repoCollapsed: Record<string, boolean>;
   fuzzyFinderOpen: boolean;
   commandPaletteOpen: boolean;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
-  setRightSidebarTab: (tab: "changes" | "tasks") => void;
+  setRightSidebarTab: (tab: "changes" | "tasks" | "scm") => void;
   setSidebarWidth: (w: number) => void;
   setRightSidebarWidth: (w: number) => void;
   setTerminalHeight: (h: number) => void;
@@ -793,13 +803,15 @@ export const useAppStore = create<AppState>((set) => ({
   diffFiles: [],
   diffMergeBase: null,
   diffSelectedFile: null,
+  diffSelectedLayer: null,
+  diffStagedFiles: null,
   diffContent: null,
   diffViewMode: "Unified",
   diffLoading: false,
   diffError: null,
-  setDiffFiles: (files, mergeBase) =>
-    set({ diffFiles: files, diffMergeBase: mergeBase }),
-  setDiffSelectedFile: (path) => set({ diffSelectedFile: path }),
+  setDiffFiles: (files, mergeBase, stagedFiles) =>
+    set({ diffFiles: files, diffMergeBase: mergeBase, diffStagedFiles: stagedFiles ?? null }),
+  setDiffSelectedFile: (path, layer) => set({ diffSelectedFile: path, diffSelectedLayer: layer ?? null }),
   setDiffContent: (content) => set({ diffContent: content }),
   setDiffViewMode: (mode) => set({ diffViewMode: mode }),
   setDiffLoading: (loading) => set({ diffLoading: loading }),
@@ -809,9 +821,22 @@ export const useAppStore = create<AppState>((set) => ({
       diffFiles: [],
       diffMergeBase: null,
       diffSelectedFile: null,
+      diffSelectedLayer: null,
+      diffStagedFiles: null,
       diffContent: null,
       diffError: null,
     }),
+
+  // -- SCM --
+  scmSummary: {},
+  scmDetail: null,
+  scmDetailLoading: false,
+  setScmSummary: (wsId, summary) =>
+    set((s) => ({
+      scmSummary: { ...s.scmSummary, [wsId]: summary },
+    })),
+  setScmDetail: (detail) => set({ scmDetail: detail }),
+  setScmDetailLoading: (loading) => set({ scmDetailLoading: loading }),
 
   // -- Terminal --
   terminalTabs: {},
