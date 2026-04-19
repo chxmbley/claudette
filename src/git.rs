@@ -66,9 +66,16 @@ pub async fn validate_repo(path: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Resolve the default branch for a repository.
+///
+/// Tries, in order: remote HEAD symbolic-ref, remote-tracking `main`/`master`,
+/// local `main`/`master`, and finally `symbolic-ref HEAD` (the currently
+/// checked-out branch). The last fallback is a best-effort guess for local-only
+/// repos with non-standard branch names — it may not reflect the true default
+/// if HEAD has been moved to a feature branch.
 pub async fn default_branch(repo_path: &str) -> Result<String, GitError> {
     // Resolve the primary remote name (usually "origin", but could be "upstream"
-    // in fork-and-PR workflows). Falls back to "origin" if no remote exists.
+    // in fork-and-PR workflows).
     let remote = run_git(repo_path, &["remote"])
         .await
         .ok()
@@ -132,6 +139,12 @@ pub async fn default_branch(repo_path: &str) -> Result<String, GitError> {
         return Ok("master".into());
     }
 
+    // Ultimate fallback: use the current branch (best guess for local repos
+    // with non-standard branch names like "trunk" or "develop").
+    if let Ok(current) = run_git(repo_path, &["symbolic-ref", "HEAD", "--short"]).await {
+        return Ok(current);
+    }
+
     Err(GitError::CommandFailed(
         "Could not determine default branch".into(),
     ))
@@ -143,11 +156,16 @@ pub async fn default_branch(repo_path: &str) -> Result<String, GitError> {
 /// timeout. Failures are logged but never propagated — callers can proceed with
 /// potentially stale refs when the network is unavailable.
 pub async fn fetch_remote(repo_path: &str) -> Result<(), GitError> {
-    let remote = run_git(repo_path, &["remote"])
-        .await
-        .ok()
-        .and_then(|out| out.lines().next().map(|l| l.to_string()))
-        .unwrap_or_else(|| "origin".to_string());
+    let remote = match run_git(repo_path, &["remote"]).await {
+        Ok(output) => match output.lines().next() {
+            Some(r) => r.to_string(),
+            None => return Ok(()),
+        },
+        Err(e) => {
+            eprintln!("[git] failed to list remotes: {e}");
+            return Ok(());
+        }
+    };
 
     // Spawn with kill_on_drop so the child is terminated if the timeout fires.
     let mut child = match Command::new("git")
@@ -189,6 +207,19 @@ pub async fn create_worktree(
     // Fetch latest remote state before branching (best-effort).
     let _ = fetch_remote(repo_path).await;
     let base = default_branch(repo_path).await?;
+
+    // Verify the base ref points to a real commit (symbolic-ref HEAD returns
+    // a branch name even on unborn branches with zero commits).
+    if run_git(repo_path, &["rev-parse", "--verify", &base])
+        .await
+        .is_err()
+    {
+        return Err(GitError::CommandFailed(
+            "Repository has no commits — create at least one commit before creating a workspace"
+                .into(),
+        ));
+    }
+
     run_git(
         repo_path,
         &["worktree", "add", "-b", branch_name, worktree_path, &base],
@@ -314,12 +345,12 @@ pub async fn rename_branch(path: &str, old_name: &str, new_name: &str) -> Result
 
 /// Get the remote URL for a repository (typically `origin`).
 pub async fn get_remote_url(repo_path: &str) -> Result<String, GitError> {
-    // Resolve the primary remote name (same approach as default_branch)
-    let remote = run_git(repo_path, &["remote"])
-        .await
-        .ok()
-        .and_then(|out| out.lines().next().map(|l| l.to_string()))
-        .unwrap_or_else(|| "origin".to_string());
+    let output = run_git(repo_path, &["remote"]).await?;
+    let remote = output
+        .lines()
+        .next()
+        .map(|l| l.to_string())
+        .ok_or_else(|| GitError::CommandFailed("No remote configured".into()))?;
 
     run_git(repo_path, &["remote", "get-url", &remote]).await
 }
@@ -630,6 +661,53 @@ mod tests {
         let dir = setup_temp_repo().await;
         let path = dir.path().to_str().unwrap();
         fetch_remote(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_worktree_empty_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        run_git(path, &["init", "-b", "main"]).await.unwrap();
+
+        let wt = dir.path().join("worktree");
+        let err = create_worktree(path, "test-branch", wt.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no commits"),
+            "expected 'no commits' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_branch_nonstandard_local_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        run_git(path, &["init", "-b", "trunk"]).await.unwrap();
+        run_git(path, &["config", "user.email", "test@test.com"])
+            .await
+            .unwrap();
+        run_git(path, &["config", "user.name", "Test"])
+            .await
+            .unwrap();
+        let readme = dir.path().join("README.md");
+        std::fs::write(&readme, "# test").unwrap();
+        run_git(path, &["add", "-A"]).await.unwrap();
+        run_git(path, &["commit", "-m", "initial"]).await.unwrap();
+
+        let branch = default_branch(path).await.unwrap();
+        assert_eq!(branch, "trunk");
+    }
+
+    #[tokio::test]
+    async fn test_get_remote_url_no_remote() {
+        let dir = setup_temp_repo().await;
+        let path = dir.path().to_str().unwrap();
+        let err = get_remote_url(path).await.unwrap_err();
+        assert!(
+            err.to_string().contains("No remote configured"),
+            "expected 'No remote configured', got: {err}"
+        );
     }
 
     #[tokio::test]
