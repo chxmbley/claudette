@@ -69,6 +69,7 @@ import styles from "./ChatPanel.module.css";
 import caretStyles from "./caret.module.css";
 
 import { SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "../../utils/spinnerFrames";
+import { formatTokens } from "./formatTokens";
 
 /** Format a duration in seconds as "15s" or "2m 34s". */
 function formatElapsedSeconds(secs: number): string {
@@ -565,6 +566,10 @@ export function ChatPanel() {
             duration_ms: null,
             created_at: new Date().toISOString(),
             thinking: null,
+            input_tokens: null,
+            output_tokens: null,
+            cache_read_tokens: null,
+            cache_creation_tokens: null,
           });
         };
 
@@ -733,6 +738,10 @@ export function ChatPanel() {
       duration_ms: null,
       created_at: new Date().toISOString(),
       thinking: null,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
     });
     // Add optimistic attachment data so images display immediately.
     if (attachments?.length) {
@@ -1089,10 +1098,12 @@ function TurnSummary({
   onRollback?: () => void;
 }) {
   const hasElapsed = typeof turn.durationMs === "number" && turn.durationMs > 0;
+  const hasTokens =
+    typeof turn.inputTokens === "number" && typeof turn.outputTokens === "number";
   const hasCopy = assistantText.length > 0;
   const hasFork = !!onFork;
   const hasRollback = !!onRollback;
-  const showFooter = hasElapsed || hasCopy || hasFork || hasRollback;
+  const showFooter = hasElapsed || hasTokens || hasCopy || hasFork || hasRollback;
 
   return (
     <div className={styles.turnSummaryWrapper}>
@@ -1147,6 +1158,8 @@ function TurnSummary({
       {showFooter && (
         <TurnFooter
           durationMs={turn.durationMs}
+          inputTokens={turn.inputTokens}
+          outputTokens={turn.outputTokens}
           assistantText={hasCopy ? assistantText : undefined}
           onFork={onFork}
           onRollback={onRollback}
@@ -1160,11 +1173,15 @@ function TurnSummary({
  *  Rendered below the turn summary for every completed turn. */
 function TurnFooter({
   durationMs,
+  inputTokens,
+  outputTokens,
   assistantText,
   onFork,
   onRollback,
 }: {
   durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
   assistantText?: string;
   onFork?: () => void;
   onRollback?: () => void;
@@ -1205,6 +1222,13 @@ function TurnFooter({
     e.stopPropagation();
     onRollback?.();
   };
+
+  const tokensNode =
+    typeof inputTokens === "number" && typeof outputTokens === "number" ? (
+      <span key="tokens" className={styles.turnFooterTokens}>
+        {formatTokens(inputTokens)} in · {formatTokens(outputTokens)} out
+      </span>
+    ) : null;
 
   const elapsedNode =
     typeof durationMs === "number" && durationMs > 0 ? (
@@ -1267,12 +1291,18 @@ function TurnFooter({
     );
   }
 
-  if (!elapsedNode && actionButtons.length === 0) return null;
+  if (!tokensNode && !elapsedNode && actionButtons.length === 0) return null;
+
+  const hasMetadata = !!(tokensNode || elapsedNode);
 
   return (
     <div className={styles.turnFooter} onClick={(e) => e.stopPropagation()}>
+      {tokensNode}
+      {tokensNode && elapsedNode && (
+        <span className={styles.turnFooterDot} aria-hidden="true">·</span>
+      )}
       {elapsedNode}
-      {elapsedNode && actionButtons.length > 0 && (
+      {hasMetadata && actionButtons.length > 0 && (
         <span className={styles.turnFooterDot} aria-hidden="true">·</span>
       )}
       {actionButtons}

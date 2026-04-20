@@ -345,6 +345,10 @@ async fn handle_send_chat_message(
         duration_ms: None,
         created_at: now_iso(),
         thinking: None,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
     };
     db.insert_chat_message(&user_msg)
         .map_err(|e| e.to_string())?;
@@ -504,6 +508,10 @@ async fn handle_send_chat_message(
                 if !full_text.trim().is_empty()
                     && let Ok(db) = Database::open(&db_path)
                 {
+                    // TODO(#300 phase 1+): the Tauri bridge (commands/chat.rs) tracks
+                    // `latest_usage` from MessageDelta events and stamps per-message
+                    // token counts here. The remote server path hasn't been updated
+                    // yet, so remote sessions currently persist NULL token fields.
                     let msg = ChatMessage {
                         id: uuid::Uuid::new_v4().to_string(),
                         workspace_id: ws_id.clone(),
@@ -513,6 +521,10 @@ async fn handle_send_chat_message(
                         duration_ms: None,
                         created_at: now_iso(),
                         thinking: pending_thinking.take(),
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
                     };
                     let _ = db.insert_chat_message(&msg);
                 }
@@ -568,6 +580,10 @@ async fn handle_stop_agent(
         duration_ms: None,
         created_at: now_iso(),
         thinking: None,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
     };
     db.insert_chat_message(&msg).map_err(|e| e.to_string())?;
     Ok(json!(null))

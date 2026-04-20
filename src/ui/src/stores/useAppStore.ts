@@ -51,6 +51,16 @@ export interface CompletedTurn {
   /** Total time this turn took, in milliseconds. Summed from the
    *  duration_ms of assistant messages produced during the turn. */
   durationMs?: number;
+  /** Turn-total input tokens. Live turns receive this from the CLI's
+   *  `result.usage`; persisted turns are reconstructed by summing the
+   *  `input_tokens` of each assistant `ChatMessage` in the turn (see
+   *  `reconstructCompletedTurns`). Undefined for legacy turns with no
+   *  token metadata on any message. */
+  inputTokens?: number;
+  /** Turn-total output tokens. Live turns receive this from the CLI's
+   *  `result.usage`; persisted turns are reconstructed by summing the
+   *  `output_tokens` of each assistant `ChatMessage` in the turn. */
+  outputTokens?: number;
 }
 
 export interface AgentQuestionItem {
@@ -123,6 +133,8 @@ interface AppState {
     messageCount: number,
     turnId?: string,
     durationMs?: number,
+    inputTokens?: number,
+    outputTokens?: number,
   ) => void;
   hydrateCompletedTurns: (wsId: string, turns: CompletedTurn[]) => void;
   setCompletedTurns: (wsId: string, turns: CompletedTurn[]) => void;
@@ -575,7 +587,7 @@ export const useAppStore = create<AppState>((set) => ({
         ),
       },
     })),
-  finalizeTurn: (wsId, messageCount, turnId, durationMs) =>
+  finalizeTurn: (wsId, messageCount, turnId, durationMs, inputTokens, outputTokens) =>
     set((s) => {
       const activities = s.toolActivities[wsId] || [];
       if (activities.length === 0) {
@@ -603,6 +615,8 @@ export const useAppStore = create<AppState>((set) => ({
         collapsed: true,
         afterMessageIndex: (s.chatMessages[wsId] || []).length,
         durationMs,
+        inputTokens,
+        outputTokens,
       };
       debugChat("store", "finalizeTurn", {
         wsId,
