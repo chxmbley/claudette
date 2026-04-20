@@ -8,6 +8,8 @@ import type { ConversationCheckpoint } from "../types/checkpoint";
 import { extractToolSummary } from "./toolSummary";
 import { parseAskUserQuestion } from "./parseAgentQuestion";
 import { debugChat } from "../utils/chatDebug";
+import { extractLatestCallUsage } from "../utils/extractLatestCallUsage";
+import { pickMeterUsageFromResult } from "./pickMeterUsageFromResult";
 
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 
@@ -280,6 +282,9 @@ export function useAgentStream() {
               pendingMessageCount: turnMessageCountRef.current[wsId] || 0,
               pendingToolCount: (useAppStore.getState().toolActivities[wsId] || []).length,
             });
+            // CompletedTurn / TurnFooter keep aggregate semantics — the
+            // top-level `result.usage.*` is the total cost/work across
+            // all inner tool-use iterations in this Claudette-level turn.
             finalizeTurn(
               wsId,
               turnMessageCountRef.current[wsId] || 0,
@@ -290,6 +295,17 @@ export function useAgentStream() {
               streamEvent.usage?.cache_read_input_tokens ?? undefined,
               streamEvent.usage?.cache_creation_input_tokens ?? undefined,
             );
+            // Meter gets the FINAL iteration's per-call usage instead
+            // (via iterations[0], falling back to aggregate on older CLI
+            // versions). This keeps live values consistent with what the
+            // reconstructed path reads from the last assistant message's
+            // per-call DB fields. See pickMeterUsageFromResult for the
+            // precedence contract.
+            const meterUsage = pickMeterUsageFromResult(streamEvent);
+            const { setLatestTurnUsage, clearLatestTurnUsage } =
+              useAppStore.getState();
+            if (meterUsage) setLatestTurnUsage(wsId, meterUsage);
+            else clearLatestTurnUsage(wsId);
             turnMessageCountRef.current[wsId] = 0;
             turnFinalizedRef.current[wsId] = true;
             updateWorkspace(wsId, { agent_status: "Idle" });
@@ -494,6 +510,11 @@ export function useAgentStream() {
             messageIds: filtered.map((msg) => msg.id),
           });
           setChatMessages(wsId, filtered);
+          const callUsage = extractLatestCallUsage(filtered);
+          const { setLatestTurnUsage, clearLatestTurnUsage } =
+            useAppStore.getState();
+          if (callUsage) setLatestTurnUsage(wsId, callUsage);
+          else clearLatestTurnUsage(wsId);
         })
         .catch((e) => console.error("Failed to reload messages after checkpoint:", e));
     });

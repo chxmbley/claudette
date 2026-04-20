@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { DEFAULT_THEME_ID } from "../styles/themes";
 import { debugChat } from "../utils/chatDebug";
+import { extractLatestCallUsage } from "../utils/extractLatestCallUsage";
 import type {
   Repository,
   Workspace,
@@ -151,6 +152,10 @@ interface AppState {
    *  when the timeline doesn't record one. */
   latestTurnUsage: Record<string, TurnUsage>;
   setLatestTurnUsage: (wsId: string, usage: TurnUsage) => void;
+  /** Delete the meter's usage entry for a workspace. Used when a
+   *  rollback or empty load leaves no assistant message with token data —
+   *  clearing hides the meter rather than leaving a stale value. */
+  clearLatestTurnUsage: (wsId: string) => void;
   setChatMessages: (wsId: string, messages: ChatMessage[]) => void;
   addChatMessage: (wsId: string, message: ChatMessage) => void;
   setStreamingContent: (wsId: string, content: string) => void;
@@ -557,6 +562,13 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({
       latestTurnUsage: { ...s.latestTurnUsage, [wsId]: usage },
     })),
+  clearLatestTurnUsage: (wsId) =>
+    set((s) => {
+      if (!(wsId in s.latestTurnUsage)) return {};
+      const next = { ...s.latestTurnUsage };
+      delete next[wsId];
+      return { latestTurnUsage: next };
+    }),
   setChatMessages: (wsId, messages) =>
     set((s) => ({
       chatMessages: { ...s.chatMessages, [wsId]: messages },
@@ -657,24 +669,12 @@ export const useAppStore = create<AppState>((set) => ({
     cacheCreationTokens,
   ) =>
     set((s) => {
-      // Always refresh the meter's latestTurnUsage — even for tool-free
-      // turns that don't produce a CompletedTurn. Only write when the
-      // caller actually provided input/output tokens (avoids stomping the
-      // previous value with an all-undefined record on rare empty Results).
-      const hasUsage =
-        typeof inputTokens === "number" || typeof outputTokens === "number";
-      const nextLatestTurnUsage = hasUsage
-        ? {
-            ...s.latestTurnUsage,
-            [wsId]: {
-              inputTokens,
-              outputTokens,
-              cacheReadTokens,
-              cacheCreationTokens,
-            },
-          }
-        : s.latestTurnUsage;
-
+      // Phase 2.5: finalizeTurn no longer writes latestTurnUsage. The
+      // meter needs per-call values, not the turn-aggregate we receive
+      // here — useAgentStream's result handler calls setLatestTurnUsage
+      // separately with the correct per-call data. The tokens we DO
+      // receive here stay as CompletedTurn aggregate fields for the
+      // TurnFooter's "turn-total work" view.
       const activities = s.toolActivities[wsId] || [];
       if (activities.length === 0) {
         debugChat("store", "finalizeTurn skipped", {
@@ -685,7 +685,7 @@ export const useAppStore = create<AppState>((set) => ({
             (turn) => turn.id,
           ),
         });
-        return { latestTurnUsage: nextLatestTurnUsage };
+        return {};
       }
       const turn: CompletedTurn = {
         id: turnId ?? crypto.randomUUID(),
@@ -723,7 +723,6 @@ export const useAppStore = create<AppState>((set) => ({
           [wsId]: [...(s.completedTurns[wsId] || []), turn],
         },
         toolActivities: { ...s.toolActivities, [wsId]: [] },
-        latestTurnUsage: nextLatestTurnUsage,
       };
     }),
   hydrateCompletedTurns: (wsId, turns) =>
@@ -768,32 +767,11 @@ export const useAppStore = create<AppState>((set) => ({
         nextIds: nextTurns.map((turn) => turn.id),
       });
 
-      // Seed latestTurnUsage from the most recent hydrated turn so the
-      // meter renders correctly on workspace reload, without needing a
-      // new turn to land. Only write if the hydrated turn has live tokens
-      // (legacy turns without token metadata leave the field unset).
-      const lastTurn = nextTurns[nextTurns.length - 1];
-      const nextLatestTurnUsage =
-        lastTurn &&
-        (typeof lastTurn.inputTokens === "number" ||
-          typeof lastTurn.outputTokens === "number")
-          ? {
-              ...s.latestTurnUsage,
-              [wsId]: {
-                inputTokens: lastTurn.inputTokens,
-                outputTokens: lastTurn.outputTokens,
-                cacheReadTokens: lastTurn.cacheReadTokens,
-                cacheCreationTokens: lastTurn.cacheCreationTokens,
-              },
-            }
-          : s.latestTurnUsage;
-
       return {
         completedTurns: {
           ...s.completedTurns,
           [wsId]: nextTurns,
         },
-        latestTurnUsage: nextLatestTurnUsage,
       };
     }),
   setCompletedTurns: (wsId, turns) =>
@@ -880,6 +858,18 @@ export const useAppStore = create<AppState>((set) => ({
       const updatedLastMessages = lastMsg
         ? { ...s.lastMessages, [wsId]: lastMsg }
         : restLastMessages;
+      // Recompute the meter's latestTurnUsage from the rolled-back message
+      // list. Write if the last assistant message has token data; delete
+      // the entry otherwise so the meter hides.
+      const nextCall = extractLatestCallUsage(messages);
+      let latestTurnUsage = s.latestTurnUsage;
+      if (nextCall) {
+        latestTurnUsage = { ...s.latestTurnUsage, [wsId]: nextCall };
+      } else if (wsId in s.latestTurnUsage) {
+        const next = { ...s.latestTurnUsage };
+        delete next[wsId];
+        latestTurnUsage = next;
+      }
       return {
         chatMessages: { ...s.chatMessages, [wsId]: messages },
         lastMessages: updatedLastMessages,
@@ -899,6 +889,7 @@ export const useAppStore = create<AppState>((set) => ({
             return current.filter((cp) => cp.turn_index <= target.turn_index);
           })(),
         },
+        latestTurnUsage,
       };
     }),
 

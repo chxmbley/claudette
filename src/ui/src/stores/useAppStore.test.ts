@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useAppStore } from "./useAppStore";
 import type { AgentQuestion } from "./useAppStore";
+import type { ChatMessage } from "../types/chat";
 import type { ConversationCheckpoint } from "../types/checkpoint";
 import { applyPlanModeMountDefault } from "../components/chat/applyPlanModeMountDefault";
 
@@ -884,24 +885,39 @@ describe("finalizeTurn token counts", () => {
     expect(turns[0].cacheCreationTokens).toBeUndefined();
   });
 
-  it("writes latestTurnUsage alongside the CompletedTurn when tokens are provided", () => {
+  it("does not write latestTurnUsage — caller is responsible for that", () => {
+    // Phase 2.5: finalizeTurn stores aggregate values on CompletedTurn
+    // (for TurnFooter's turn-total view) but does NOT write the meter's
+    // latestTurnUsage slice. The meter's per-call values come via a
+    // separate setLatestTurnUsage call in useAgentStream.
+    useAppStore.setState({
+      latestTurnUsage: {
+        ws1: {
+          inputTokens: 999,
+          outputTokens: 42,
+          cacheReadTokens: 12_345,
+          cacheCreationTokens: 67,
+        },
+      },
+    });
     useAppStore.getState().finalizeTurn(
       "ws1", 1, "turn-4", 1000, 1500, 240, 80_000, 1_200,
     );
-    const usage = useAppStore.getState().latestTurnUsage.ws1;
-    expect(usage).toEqual({
-      inputTokens: 1500,
-      outputTokens: 240,
-      cacheReadTokens: 80_000,
-      cacheCreationTokens: 1_200,
+    // The pre-existing meter slice is untouched.
+    expect(useAppStore.getState().latestTurnUsage.ws1).toEqual({
+      inputTokens: 999,
+      outputTokens: 42,
+      cacheReadTokens: 12_345,
+      cacheCreationTokens: 67,
     });
   });
 });
 
 describe("finalizeTurn tool-free turn (no activities)", () => {
   beforeEach(() => {
-    // NO toolActivities → finalizeTurn will early-return for the timeline,
-    // but the meter's latestTurnUsage slice must still refresh.
+    // NO toolActivities → finalizeTurn early-returns without producing
+    // a CompletedTurn. Under Phase 2.5 it also doesn't touch
+    // latestTurnUsage — that's purely the caller's responsibility now.
     useAppStore.setState({
       completedTurns: {},
       toolActivities: {},
@@ -909,23 +925,15 @@ describe("finalizeTurn tool-free turn (no activities)", () => {
     });
   });
 
-  it("updates latestTurnUsage even when no tool activities exist", () => {
+  it("does not create a CompletedTurn and does not touch latestTurnUsage", () => {
     useAppStore.getState().finalizeTurn(
       "ws1", 1, "turn-x", 800, 500, 60, 20_000, 300,
     );
-    // No CompletedTurn was appended — the timeline stays unchanged.
     expect(useAppStore.getState().completedTurns.ws1).toBeUndefined();
-    // But latestTurnUsage IS updated so the ContextMeter can re-render.
-    expect(useAppStore.getState().latestTurnUsage.ws1).toEqual({
-      inputTokens: 500,
-      outputTokens: 60,
-      cacheReadTokens: 20_000,
-      cacheCreationTokens: 300,
-    });
+    expect(useAppStore.getState().latestTurnUsage.ws1).toBeUndefined();
   });
 
-  it("preserves existing latestTurnUsage when finalizeTurn has no token data", () => {
-    // Seed a previous turn's usage.
+  it("leaves existing latestTurnUsage untouched", () => {
     useAppStore.setState({
       latestTurnUsage: {
         ws1: {
@@ -936,10 +944,7 @@ describe("finalizeTurn tool-free turn (no activities)", () => {
         },
       },
     });
-    // Finalize a turn with no usage payload (rare but possible on a broken stream).
     useAppStore.getState().finalizeTurn("ws1", 1, "turn-y", 500);
-    // Previous usage stays intact — we never want to stomp a real value with
-    // an all-undefined record.
     expect(useAppStore.getState().latestTurnUsage.ws1).toEqual({
       inputTokens: 100,
       outputTokens: 50,
@@ -949,7 +954,7 @@ describe("finalizeTurn tool-free turn (no activities)", () => {
   });
 });
 
-describe("hydrateCompletedTurns seeds latestTurnUsage", () => {
+describe("hydrateCompletedTurns leaves latestTurnUsage untouched", () => {
   beforeEach(() => {
     useAppStore.setState({
       completedTurns: {},
@@ -957,7 +962,18 @@ describe("hydrateCompletedTurns seeds latestTurnUsage", () => {
     });
   });
 
-  it("copies the latest hydrated turn's token fields into latestTurnUsage", () => {
+  it("does not modify latestTurnUsage when hydrating turns with tokens", () => {
+    // Seed an existing meter value from a prior live turn.
+    useAppStore.setState({
+      latestTurnUsage: {
+        ws1: {
+          inputTokens: 999,
+          outputTokens: 42,
+          cacheReadTokens: 12_345,
+          cacheCreationTokens: 67,
+        },
+      },
+    });
     useAppStore.getState().hydrateCompletedTurns("ws1", [
       {
         id: "cp1",
@@ -968,30 +984,21 @@ describe("hydrateCompletedTurns seeds latestTurnUsage", () => {
         durationMs: 1000,
         inputTokens: 500,
         outputTokens: 100,
-      },
-      {
-        id: "cp2",
-        activities: [],
-        messageCount: 1,
-        collapsed: true,
-        afterMessageIndex: 4,
-        durationMs: 2000,
-        inputTokens: 2000,
-        outputTokens: 150,
         cacheReadTokens: 50_000,
         cacheCreationTokens: 800,
       },
     ]);
-    // cp2 is the most recent — its tokens should seed the meter.
+    // Hydration should not stomp the existing meter value — the meter
+    // is now seeded by extractLatestCallUsage at the caller.
     expect(useAppStore.getState().latestTurnUsage.ws1).toEqual({
-      inputTokens: 2000,
-      outputTokens: 150,
-      cacheReadTokens: 50_000,
-      cacheCreationTokens: 800,
+      inputTokens: 999,
+      outputTokens: 42,
+      cacheReadTokens: 12_345,
+      cacheCreationTokens: 67,
     });
   });
 
-  it("leaves latestTurnUsage untouched when hydrated turns have no token data", () => {
+  it("does not create latestTurnUsage for a workspace that had none", () => {
     useAppStore.getState().hydrateCompletedTurns("ws1", [
       {
         id: "cp1",
@@ -999,8 +1006,132 @@ describe("hydrateCompletedTurns seeds latestTurnUsage", () => {
         messageCount: 1,
         collapsed: true,
         afterMessageIndex: 2,
+        inputTokens: 500,
+        outputTokens: 100,
       },
     ]);
+    expect(useAppStore.getState().latestTurnUsage.ws1).toBeUndefined();
+  });
+});
+
+describe("clearLatestTurnUsage", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      latestTurnUsage: {
+        ws1: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 10_000,
+          cacheCreationTokens: 500,
+        },
+        ws2: {
+          inputTokens: 200,
+          outputTokens: 75,
+        },
+      },
+    });
+  });
+
+  it("deletes the entry for the specified workspace only", () => {
+    useAppStore.getState().clearLatestTurnUsage("ws1");
+    const slice = useAppStore.getState().latestTurnUsage;
+    expect(slice.ws1).toBeUndefined();
+    expect(slice.ws2).toEqual({ inputTokens: 200, outputTokens: 75 });
+  });
+
+  it("is a no-op for workspaces not in the slice", () => {
+    useAppStore.getState().clearLatestTurnUsage("ws-never-set");
+    expect(useAppStore.getState().latestTurnUsage.ws1).toBeDefined();
+    expect(useAppStore.getState().latestTurnUsage.ws2).toBeDefined();
+  });
+});
+
+describe("rollbackConversation updates latestTurnUsage", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      chatMessages: {},
+      completedTurns: {},
+      toolActivities: {},
+      latestTurnUsage: {
+        ws1: {
+          inputTokens: 999,
+          outputTokens: 42,
+          cacheReadTokens: 12_345,
+          cacheCreationTokens: 67,
+        },
+      },
+      lastMessages: {},
+      agentQuestions: {},
+      planApprovals: {},
+      streamingContent: {},
+      streamingThinking: {},
+      checkpoints: {},
+    });
+  });
+
+  it("writes latestTurnUsage from the last assistant message with token data", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "m1",
+        workspace_id: "ws1",
+        role: "User",
+        content: "hi",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      },
+      {
+        id: "m2",
+        workspace_id: "ws1",
+        role: "Assistant",
+        content: "hello",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: null,
+        input_tokens: 300,
+        output_tokens: 80,
+        cache_read_tokens: 5_000,
+        cache_creation_tokens: 200,
+      },
+    ];
+    useAppStore.getState().rollbackConversation("ws1", "cp1", msgs);
+    expect(useAppStore.getState().latestTurnUsage.ws1).toEqual({
+      inputTokens: 300,
+      outputTokens: 80,
+      cacheReadTokens: 5_000,
+      cacheCreationTokens: 200,
+    });
+  });
+
+  it("clears latestTurnUsage when rollback produces no assistant messages", () => {
+    useAppStore.getState().rollbackConversation("ws1", "cp1", []);
+    expect(useAppStore.getState().latestTurnUsage.ws1).toBeUndefined();
+  });
+
+  it("clears latestTurnUsage when rollback produces only pre-migration assistant messages", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "m1",
+        workspace_id: "ws1",
+        role: "Assistant",
+        content: "legacy",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      },
+    ];
+    useAppStore.getState().rollbackConversation("ws1", "cp1", msgs);
     expect(useAppStore.getState().latestTurnUsage.ws1).toBeUndefined();
   });
 });
