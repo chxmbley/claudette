@@ -238,6 +238,11 @@ interface AppState {
   markWorkspaceAsUnread: (wsId: string) => void;
   clearUnreadCompletion: (wsId: string) => void;
 
+  // -- Toasts --
+  toasts: { id: string; message: string }[];
+  addToast: (message: string) => void;
+  removeToast: (id: string) => void;
+
   // -- Permissions --
   permissionLevel: Record<string, PermissionLevel>;
   setPermissionLevel: (wsId: string, level: PermissionLevel) => void;
@@ -458,6 +463,8 @@ interface AppState {
   slashCommandsByWorkspace: Record<string, SlashCommand[]>;
   setSlashCommands: (wsId: string, cmds: SlashCommand[]) => void;
 }
+
+const toastTimers = new Map<string, number>();
 
 export const useAppStore = create<AppState>((set) => ({
   // -- Repositories --
@@ -912,6 +919,26 @@ export const useAppStore = create<AppState>((set) => ({
       newSet.delete(wsId);
       return { unreadCompletions: newSet };
     }),
+
+  // -- Toasts --
+  toasts: [],
+  addToast: (message) => {
+    const id = crypto.randomUUID();
+    set((s) => ({ toasts: [...s.toasts, { id, message }] }));
+    const handle = window.setTimeout(() => {
+      toastTimers.delete(id);
+      set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+    }, 5000);
+    toastTimers.set(id, handle);
+  },
+  removeToast: (id) => {
+    const handle = toastTimers.get(id);
+    if (handle != null) {
+      window.clearTimeout(handle);
+      toastTimers.delete(id);
+    }
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
 
   // -- Permissions --
   permissionLevel: {},
