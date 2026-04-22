@@ -39,12 +39,16 @@ export const createRepositoriesSlice: StateCreator<
       // Collect all tab ids we're about to orphan, then drop their pane
       // trees and active-pane entries alongside the workspace-keyed maps.
       const orphanedTabIds = new Set<number>();
+      const newDiffSelectionByWorkspace = { ...s.diffSelectionByWorkspace };
+      const newChatDrafts = { ...s.chatDrafts };
       for (const wsId of removedWsIds) {
         for (const tab of s.terminalTabs[wsId] ?? []) orphanedTabIds.add(tab.id);
         delete newTerminalTabs[wsId];
         delete newActiveTerminalTabId[wsId];
         delete newWorkspaceTerminalCommands[wsId];
         newUnreadCompletions.delete(wsId);
+        delete newDiffSelectionByWorkspace[wsId];
+        delete newChatDrafts[wsId];
       }
       const newPaneTrees = { ...s.terminalPaneTrees };
       const newActivePane = { ...s.activeTerminalPaneId };
@@ -72,6 +76,8 @@ export const createRepositoriesSlice: StateCreator<
         terminalPaneTrees: newPaneTrees,
         activeTerminalPaneId: newActivePane,
         diffTabsByWorkspace: newDiffTabs,
+        diffSelectionByWorkspace: newDiffSelectionByWorkspace,
+        chatDrafts: newChatDrafts,
       };
     }),
 });

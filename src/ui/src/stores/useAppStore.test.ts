@@ -4,6 +4,7 @@ import type { AgentQuestion } from "./useAppStore";
 import type { ChatMessage } from "../types/chat";
 import type { ConversationCheckpoint } from "../types/checkpoint";
 import type { Workspace } from "../types/workspace";
+import type { Repository } from "../types/repository";
 import { applyPlanModeMountDefault } from "../components/chat/applyPlanModeMountDefault";
 
 const WS_ID = "test-workspace";
@@ -1573,7 +1574,6 @@ describe("removeWorkspace", () => {
     expect(s.terminalTabs["ws-a"]).toBeUndefined();
     expect(s.activeTerminalTabId["ws-a"]).toBeUndefined();
     expect(s.workspaceTerminalCommands["ws-a"]).toBeUndefined();
-    // Other workspace's state is untouched.
     expect(s.terminalTabs["ws-b"]).toBeDefined();
   });
 
@@ -1626,11 +1626,7 @@ describe("addChatAttachments accepts agent-origin rows", () => {
     expect(list[1].origin).toBe("agent");
   });
 
-  it("keeps origin field intact through addChatAttachments — needed for the assistant-message re-route in ChatPanel", () => {
-    // ChatPanel routes `origin: 'agent'` rows to the next assistant message
-    // chronologically (instead of the FK anchor user message). The store
-    // must not strip or default-shift this field, otherwise the visual
-    // anchoring breaks.
+  it("keeps origin field intact through addChatAttachments", () => {
     const wsId = "ws-route";
     useAppStore.getState().addChatAttachments(wsId, [
       {
@@ -1653,8 +1649,6 @@ describe("addChatAttachments accepts agent-origin rows", () => {
   });
 
   it("preserves field-by-field round trip for SVG agent attachments", () => {
-    // SVG is allowed by policy; rendering uses data:image/svg+xml URL — make
-    // sure the type flows through unchanged.
     const wsId = "ws-2";
     useAppStore.getState().addChatAttachments(wsId, [
       {
@@ -1674,5 +1668,194 @@ describe("addChatAttachments accepts agent-origin rows", () => {
     const att = useAppStore.getState().chatAttachments[wsId][0];
     expect(att.media_type).toBe("image/svg+xml");
     expect(att.data_base64).toBe("PHN2Zy8+");
+  });
+});
+
+function makeRepository(id: string): Repository {
+  return {
+    id,
+    path: `/repos/${id}`,
+    name: id,
+    path_slug: id,
+    icon: null,
+    created_at: "",
+    setup_script: null,
+    custom_instructions: null,
+    sort_order: 0,
+    branch_rename_preferences: null,
+    setup_script_auto_run: false,
+    base_branch: null,
+    default_remote: null,
+    path_valid: true,
+    remote_connection_id: null,
+  };
+}
+
+describe("selectWorkspace diff selection persistence", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      selectedWorkspaceId: null,
+      diffSelectedFile: null,
+      diffSelectedLayer: null,
+      diffContent: null,
+      diffError: null,
+      diffSelectionByWorkspace: {},
+      rightSidebarTab: "chat",
+    });
+  });
+
+  it("no-op when called with the already-selected workspace id", () => {
+    useAppStore.setState({
+      selectedWorkspaceId: "ws-a",
+      diffSelectedFile: "src/main.rs",
+      diffSelectedLayer: "staged",
+      diffContent: "some content",
+    });
+    const before = useAppStore.getState();
+    useAppStore.getState().selectWorkspace("ws-a");
+    const after = useAppStore.getState();
+    expect(after.diffContent).toBe("some content");
+    expect(after.diffSelectedFile).toBe("src/main.rs");
+    expect(after.selectedWorkspaceId).toBe("ws-a");
+    expect(after.diffContent).toBe(before.diffContent);
+  });
+
+  it("saves outgoing workspace diff selection and restores the incoming one", () => {
+    useAppStore.setState({
+      selectedWorkspaceId: "ws-a",
+      diffSelectedFile: "src/lib.rs",
+      diffSelectedLayer: "unstaged",
+      diffSelectionByWorkspace: {
+        "ws-b": { path: "src/main.rs", layer: "staged" },
+      },
+    });
+
+    useAppStore.getState().selectWorkspace("ws-b");
+
+    const s = useAppStore.getState();
+    expect(s.selectedWorkspaceId).toBe("ws-b");
+    expect(s.diffSelectionByWorkspace["ws-a"]).toEqual({
+      path: "src/lib.rs",
+      layer: "unstaged",
+    });
+    expect(s.diffSelectedFile).toBe("src/main.rs");
+    expect(s.diffSelectedLayer).toBe("staged");
+    expect(s.diffContent).toBeNull();
+    expect(s.diffError).toBeNull();
+  });
+
+  it("clears diff selection when switching to a workspace with no prior selection", () => {
+    useAppStore.setState({
+      selectedWorkspaceId: "ws-a",
+      diffSelectedFile: "src/foo.rs",
+      diffSelectedLayer: null,
+      diffSelectionByWorkspace: {},
+    });
+
+    useAppStore.getState().selectWorkspace("ws-b");
+
+    const s = useAppStore.getState();
+    expect(s.diffSelectedFile).toBeNull();
+    expect(s.diffSelectedLayer).toBeNull();
+  });
+});
+
+describe("clearDiff per-workspace cleanup", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      selectedWorkspaceId: "ws-a",
+      diffSelectedFile: "src/lib.rs",
+      diffSelectedLayer: "unstaged",
+      diffSelectionByWorkspace: {
+        "ws-a": { path: "src/lib.rs", layer: "unstaged" },
+        "ws-b": { path: "src/main.rs", layer: "staged" },
+      },
+      diffFiles: [],
+      diffMergeBase: null,
+      diffStagedFiles: null,
+      diffContent: "content",
+      diffError: null,
+    });
+  });
+
+  it("removes only the current workspace's saved selection", () => {
+    useAppStore.getState().clearDiff();
+    const s = useAppStore.getState();
+    expect(s.diffSelectionByWorkspace["ws-a"]).toBeUndefined();
+    expect(s.diffSelectionByWorkspace["ws-b"]).toEqual({
+      path: "src/main.rs",
+      layer: "staged",
+    });
+  });
+
+  it("resets diff view state", () => {
+    useAppStore.getState().clearDiff();
+    const s = useAppStore.getState();
+    expect(s.diffSelectedFile).toBeNull();
+    expect(s.diffContent).toBeNull();
+  });
+});
+
+describe("removeWorkspace cleans up diffSelectionByWorkspace and chatDrafts", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      workspaces: [makeWorkspace("ws-a", "repo-1"), makeWorkspace("ws-b", "repo-1")],
+      selectedWorkspaceId: "ws-a",
+      diffSelectionByWorkspace: {
+        "ws-a": { path: "src/lib.rs", layer: null },
+        "ws-b": { path: "src/main.rs", layer: "staged" },
+      },
+      chatDrafts: { "ws-a": "hello", "ws-b": "world" },
+    });
+  });
+
+  it("removes the removed workspace's diff selection entry", () => {
+    useAppStore.getState().removeWorkspace("ws-a");
+    const s = useAppStore.getState();
+    expect(s.diffSelectionByWorkspace["ws-a"]).toBeUndefined();
+    expect(s.diffSelectionByWorkspace["ws-b"]).toBeDefined();
+  });
+
+  it("removes the removed workspace's chat draft", () => {
+    useAppStore.getState().removeWorkspace("ws-a");
+    const s = useAppStore.getState();
+    expect(s.chatDrafts["ws-a"]).toBeUndefined();
+    expect(s.chatDrafts["ws-b"]).toBe("world");
+  });
+});
+
+describe("removeRepository cleans up diffSelectionByWorkspace and chatDrafts", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      repositories: [makeRepository("repo-1"), makeRepository("repo-2")],
+      workspaces: [
+        makeWorkspace("ws-a", "repo-1"),
+        makeWorkspace("ws-b", "repo-1"),
+        makeWorkspace("ws-c", "repo-2"),
+      ],
+      selectedWorkspaceId: "ws-a",
+      diffSelectionByWorkspace: {
+        "ws-a": { path: "src/a.rs", layer: null },
+        "ws-b": { path: "src/b.rs", layer: "staged" },
+        "ws-c": { path: "src/c.rs", layer: null },
+      },
+      chatDrafts: { "ws-a": "draft-a", "ws-b": "draft-b", "ws-c": "draft-c" },
+    });
+  });
+
+  it("removes all workspace entries for the removed repo from diffSelectionByWorkspace", () => {
+    useAppStore.getState().removeRepository("repo-1");
+    const s = useAppStore.getState();
+    expect(s.diffSelectionByWorkspace["ws-a"]).toBeUndefined();
+    expect(s.diffSelectionByWorkspace["ws-b"]).toBeUndefined();
+    expect(s.diffSelectionByWorkspace["ws-c"]).toBeDefined();
+  });
+
+  it("removes all workspace entries for the removed repo from chatDrafts", () => {
+    useAppStore.getState().removeRepository("repo-1");
+    const s = useAppStore.getState();
+    expect(s.chatDrafts["ws-a"]).toBeUndefined();
+    expect(s.chatDrafts["ws-b"]).toBeUndefined();
+    expect(s.chatDrafts["ws-c"]).toBe("draft-c");
   });
 });

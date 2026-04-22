@@ -72,6 +72,7 @@ export const createWorkspacesSlice: StateCreator<
     }),
   selectWorkspace: (id) =>
     set((s) => {
+      if (id === s.selectedWorkspaceId) return s;
       // Save the outgoing workspace's diff selection before switching, then
       // restore the incoming workspace's last selection (if any). Per-workspace
       // diff *tabs* live in diffTabsByWorkspace and are preserved.

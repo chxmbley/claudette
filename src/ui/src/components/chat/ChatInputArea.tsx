@@ -252,7 +252,7 @@ export function ChatInputArea({
     return () => {
       cancelled = true;
     };
-  }, [projectPath, selectedWorkspaceId, setSlashCommands]);
+  }, [projectPath, selectedWorkspaceId, setSlashCommands, pluginRefreshToken]);
 
   // Filter by the command-name token (text before the first whitespace) so the
   // picker stays open while the user types arguments. This keeps the argument
