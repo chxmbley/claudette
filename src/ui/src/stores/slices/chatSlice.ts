@@ -140,6 +140,12 @@ export interface ChatSlice {
   ) => void;
   lastMessages: Record<string, ChatMessage>;
   setLastMessages: (msgs: Record<string, ChatMessage>) => void;
+  // Per-workspace unsent-message drafts. Lives in the store (not local
+  // component state) so drafts survive ChatPanel unmounting — e.g., when
+  // the user switches to the diff view (AppLayout swaps ChatPanel for
+  // DiffViewer) or switches workspaces entirely.
+  chatDrafts: Record<string, string>;
+  setChatDraft: (wsId: string, draft: string) => void;
 }
 
 export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
@@ -428,4 +434,9 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
     })),
   lastMessages: {},
   setLastMessages: (msgs) => set({ lastMessages: msgs }),
+  chatDrafts: {},
+  setChatDraft: (wsId, draft) =>
+    set((s) => ({
+      chatDrafts: { ...s.chatDrafts, [wsId]: draft },
+    })),
 });

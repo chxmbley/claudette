@@ -51,6 +51,10 @@ export const createWorkspacesSlice: StateCreator<
       }
       const newDiffTabs = { ...s.diffTabsByWorkspace };
       delete newDiffTabs[id];
+      const newDiffSelectionByWorkspace = { ...s.diffSelectionByWorkspace };
+      delete newDiffSelectionByWorkspace[id];
+      const newChatDrafts = { ...s.chatDrafts };
+      delete newChatDrafts[id];
       return {
         workspaces: s.workspaces.filter((w) => w.id !== id),
         selectedWorkspaceId:
@@ -62,19 +66,32 @@ export const createWorkspacesSlice: StateCreator<
         terminalPaneTrees: newPaneTrees,
         activeTerminalPaneId: newActivePane,
         diffTabsByWorkspace: newDiffTabs,
+        diffSelectionByWorkspace: newDiffSelectionByWorkspace,
+        chatDrafts: newChatDrafts,
       };
     }),
   selectWorkspace: (id) =>
     set((s) => {
+      // Save the outgoing workspace's diff selection before switching, then
+      // restore the incoming workspace's last selection (if any). Per-workspace
+      // diff *tabs* live in diffTabsByWorkspace and are preserved.
+      const prev = s.selectedWorkspaceId;
+      const selectionMap = prev
+        ? {
+            ...s.diffSelectionByWorkspace,
+            [prev]: {
+              path: s.diffSelectedFile,
+              layer: s.diffSelectedLayer,
+            },
+          }
+        : s.diffSelectionByWorkspace;
+      const restored = id ? selectionMap[id] : undefined;
       const updates: Partial<AppState> = {
         selectedWorkspaceId: id,
         rightSidebarTab: "changes",
-        // diffSelectedFile/Layer are workspace-global pointers; switching
-        // workspaces must drop them so the new workspace's tab strip and
-        // content render cleanly. Per-workspace diff *tabs* live in
-        // diffTabsByWorkspace and are preserved.
-        diffSelectedFile: null,
-        diffSelectedLayer: null,
+        diffSelectionByWorkspace: selectionMap,
+        diffSelectedFile: restored?.path ?? null,
+        diffSelectedLayer: restored?.layer ?? null,
         diffContent: null,
         diffError: null,
         diffPreviewMode: "diff",

@@ -14,6 +14,14 @@ export interface DiffSlice {
   diffMergeBase: string | null;
   diffSelectedFile: string | null;
   diffSelectedLayer: DiffLayer | null;
+  // Per-workspace persisted diff selection. Switching workspaces saves the
+  // current (file, layer) here and restores the destination workspace's last
+  // selection on entry, so the diff view remembers what the user was looking
+  // at in each workspace across switches.
+  diffSelectionByWorkspace: Record<
+    string,
+    { path: string | null; layer: DiffLayer | null }
+  >;
   diffStagedFiles: StagedDiffFiles | null;
   diffContent: FileDiff | null;
   diffViewMode: DiffViewMode;
@@ -74,6 +82,7 @@ export const createDiffSlice: StateCreator<AppState, [], [], DiffSlice> = (
   diffMergeBase: null,
   diffSelectedFile: null,
   diffSelectedLayer: null,
+  diffSelectionByWorkspace: {},
   diffStagedFiles: null,
   diffContent: null,
   diffViewMode: "Unified",
@@ -91,7 +100,17 @@ export const createDiffSlice: StateCreator<AppState, [], [], DiffSlice> = (
       diffStagedFiles: stagedFiles ?? null,
     }),
   setDiffSelectedFile: (path, layer) =>
-    set({ diffSelectedFile: path, diffSelectedLayer: layer ?? null }),
+    set((s) => {
+      const ws = s.selectedWorkspaceId;
+      const next = { path, layer: layer ?? null };
+      return {
+        diffSelectedFile: path,
+        diffSelectedLayer: layer ?? null,
+        diffSelectionByWorkspace: ws
+          ? { ...s.diffSelectionByWorkspace, [ws]: next }
+          : s.diffSelectionByWorkspace,
+      };
+    }),
   setDiffContent: (content) => set({ diffContent: content }),
   setDiffViewMode: (mode) => set({ diffViewMode: mode }),
   setDiffLoading: (loading) => set({ diffLoading: loading }),
@@ -101,19 +120,25 @@ export const createDiffSlice: StateCreator<AppState, [], [], DiffSlice> = (
   setDiffPreviewLoading: (loading) => set({ diffPreviewLoading: loading }),
   setDiffPreviewError: (error) => set({ diffPreviewError: error }),
   clearDiff: () =>
-    set({
-      diffFiles: [],
-      diffMergeBase: null,
-      diffSelectedFile: null,
-      diffSelectedLayer: null,
-      diffStagedFiles: null,
-      diffContent: null,
-      diffError: null,
-      diffPreviewMode: "diff",
-      diffPreviewContent: null,
-      diffPreviewLoading: false,
-      diffPreviewError: null,
-      diffTabsByWorkspace: {},
+    set((s) => {
+      const ws = s.selectedWorkspaceId;
+      const selectionMap = { ...s.diffSelectionByWorkspace };
+      if (ws) delete selectionMap[ws];
+      return {
+        diffFiles: [],
+        diffMergeBase: null,
+        diffSelectedFile: null,
+        diffSelectedLayer: null,
+        diffStagedFiles: null,
+        diffContent: null,
+        diffError: null,
+        diffPreviewMode: "diff",
+        diffPreviewContent: null,
+        diffPreviewLoading: false,
+        diffPreviewError: null,
+        diffTabsByWorkspace: {},
+        diffSelectionByWorkspace: selectionMap,
+      };
     }),
   openDiffTab: (workspaceId, path, layer) =>
     set((s) => {
