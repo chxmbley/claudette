@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { useAppStore } from "../../stores/useAppStore";
 import type { ToolActivity } from "../../stores/useAppStore";
 import { relativizePath } from "../../hooks/toolSummary";
@@ -26,15 +26,17 @@ export const ToolActivitiesSection = memo(function ToolActivitiesSection({
     (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES,
   );
   const [collapsed, setCollapsed] = useState(true);
+  const [prevActivitiesLength, setPrevActivitiesLength] = useState(0);
 
-  // Auto-collapse when a new turn starts (activities goes from 0 to non-zero)
-  const prevLengthRef = useRef(0);
-  useEffect(() => {
-    if (isRunning && activities.length > 0 && prevLengthRef.current === 0) {
+  // Auto-collapse when a new turn starts (activities goes from 0 to non-zero).
+  // Done during render (not in an effect) so React re-renders immediately without
+  // committing the intermediate state, avoiding cascading renders.
+  if (prevActivitiesLength !== activities.length) {
+    setPrevActivitiesLength(activities.length);
+    if (isRunning && activities.length > 0 && prevActivitiesLength === 0) {
       setCollapsed(true);
     }
-    prevLengthRef.current = activities.length;
-  }, [isRunning, activities.length]);
+  }
 
   if (activities.length === 0) return null;
 

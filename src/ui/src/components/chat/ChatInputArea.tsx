@@ -105,7 +105,14 @@ export function ChatInputArea({
     attachment: DownloadableAttachment,
   ) => void;
 }) {
-  const [chatInput, setChatInput] = useState("");
+  const chatInput = useAppStore(
+    (s) => s.chatDrafts[selectedWorkspaceId] ?? "",
+  );
+  const setChatDraftInStore = useAppStore((s) => s.setChatDraft);
+  const setChatInput = useCallback(
+    (value: string) => setChatDraftInStore(selectedWorkspaceId, value),
+    [selectedWorkspaceId, setChatDraftInStore],
+  );
   const [cursorPos, setCursorPos] = useState(0);
   const [inputScrollTop, setInputScrollTop] = useState(0);
   const [slashPickerIndex, setSlashPickerIndex] = useState(0);
@@ -168,16 +175,6 @@ export function ChatInputArea({
     voice.activeProvider,
   );
 
-  // Esc cancels an active recording regardless of where focus is. The
-  // textarea's onKeyDown also handles Esc when it has focus; clicking
-  // the mic moves focus to the button, where Esc would otherwise just
-  // defocus it instead of stopping the recording.
-  //
-  // While recording, Esc is treated as exclusively "cancel recording" —
-  // we capture it ahead of bubbling handlers and stop propagation so
-  // it doesn't also close an unrelated popover/modal that happens to
-  // be open. Without this, the same keypress could cancel recording
-  // *and* dismiss the surrounding UI, which feels jumpy.
   useEffect(() => {
     if (voice.state !== "recording") return;
     const onKey = (e: KeyboardEvent) => {
@@ -195,23 +192,17 @@ export function ChatInputArea({
     textareaRef.current?.focus();
   }, []);
 
-  // Per-session draft storage: save input when switching away,
-  // restore when switching back.
   const draftsRef = useRef<Record<string, string>>({});
   const prevSessionRef = useRef(sessionId);
   useEffect(() => {
     const prev = prevSessionRef.current;
     if (prev !== sessionId) {
-      // Save draft for the session we're leaving.
       draftsRef.current[prev] = chatInput;
-      // Restore draft for the session we're entering.
       setChatInput(draftsRef.current[sessionId] ?? "");
       prevSessionRef.current = sessionId;
-      // Reset file picker and attachment state for new session.
       setFilesLoaded(false);
       setWorkspaceFiles([]);
       mentionedFilesRef.current = new Set();
-      // Clear staged attachments so they don't leak across sessions.
       setPendingAttachments((prev) => {
         for (const a of prev) {
           if (a.preview_url.startsWith("blob:")) URL.revokeObjectURL(a.preview_url);
@@ -243,13 +234,13 @@ export function ChatInputArea({
         }
       });
     }
-  }, [chatInputPrefill, setChatInputPrefill]);
+  }, [setChatInput, chatInputPrefill, setChatInputPrefill]);
 
   const refreshSlashCommands = useCallback(() => {
     listSlashCommands(projectPath, selectedWorkspaceId)
       .then(setSlashCommands)
       .catch((e) => console.error("Failed to load slash commands:", e));
-  }, [pluginRefreshToken, projectPath, selectedWorkspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectPath, selectedWorkspaceId, setSlashCommands]);
 
   useEffect(() => {
     let cancelled = false;
@@ -261,7 +252,7 @@ export function ChatInputArea({
     return () => {
       cancelled = true;
     };
-  }, [projectPath, selectedWorkspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectPath, selectedWorkspaceId, setSlashCommands]);
 
   // Filter by the command-name token (text before the first whitespace) so the
   // picker stays open while the user types arguments. This keeps the argument
