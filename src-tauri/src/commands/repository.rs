@@ -10,6 +10,42 @@ use claudette::model::Repository;
 
 use crate::state::AppState;
 
+pub(crate) fn resolve_default_remote(remotes: &[String]) -> Option<String> {
+    match remotes.len() {
+        0 => None,
+        1 => Some(remotes[0].clone()),
+        _ => {
+            if remotes.iter().any(|r| r == "origin") {
+                Some("origin".to_string())
+            } else {
+                Some(remotes[0].clone())
+            }
+        }
+    }
+}
+
+pub(crate) fn resolve_default_branch(
+    branches: &[String],
+    default_remote: Option<&str>,
+) -> Option<String> {
+    if branches.is_empty() {
+        return None;
+    }
+    if branches.len() == 1 {
+        return Some(branches[0].clone());
+    }
+    let remote = default_remote.unwrap_or("origin");
+    let main = format!("{remote}/main");
+    if branches.iter().any(|b| b == &main) {
+        return Some(main);
+    }
+    let master = format!("{remote}/master");
+    if branches.iter().any(|b| b == &master) {
+        return Some(master);
+    }
+    Some(branches[0].clone())
+}
+
 #[derive(Serialize)]
 pub struct RepoConfigInfo {
     pub has_config_file: bool,
@@ -36,6 +72,14 @@ pub async fn add_repository(
 
     let path_slug = slug_from_path(&canon_str);
 
+    let remotes = git::list_remotes(&canon_str).await.unwrap_or_default();
+    let branches = git::list_remote_tracking_branches(&canon_str)
+        .await
+        .unwrap_or_default();
+
+    let default_remote = resolve_default_remote(&remotes);
+    let base_branch = resolve_default_branch(&branches, default_remote.as_deref());
+
     let repo = Repository {
         id: uuid::Uuid::new_v4().to_string(),
         path: canon_str,
@@ -48,6 +92,8 @@ pub async fn add_repository(
         sort_order: 0,
         branch_rename_preferences: None,
         setup_script_auto_run: false,
+        base_branch,
+        default_remote,
         path_valid: true,
     };
 
@@ -75,9 +121,14 @@ pub async fn update_repository_settings(
     custom_instructions: Option<String>,
     branch_rename_preferences: Option<String>,
     setup_script_auto_run: bool,
+    base_branch: Option<String>,
+    default_remote: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let base_branch = base_branch.filter(|s| !s.trim().is_empty());
+    let default_remote = default_remote.filter(|s| !s.trim().is_empty());
+
     let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
     db.update_repository_name(&id, &name)
         .map_err(|e| e.to_string())?;
@@ -90,6 +141,10 @@ pub async fn update_repository_settings(
     db.update_repository_branch_rename_preferences(&id, branch_rename_preferences.as_deref())
         .map_err(|e| e.to_string())?;
     db.update_repository_setup_script_auto_run(&id, setup_script_auto_run)
+        .map_err(|e| e.to_string())?;
+    db.update_repository_base_branch(&id, base_branch.as_deref())
+        .map_err(|e| e.to_string())?;
+    db.update_repository_default_remote(&id, default_remote.as_deref())
         .map_err(|e| e.to_string())?;
 
     crate::tray::rebuild_tray(&app);
@@ -230,10 +285,44 @@ pub async fn get_default_branch(
         .find(|r| r.id == repo_id)
         .ok_or("Repository not found")?;
 
-    match git::default_branch(&repo.path).await {
+    if let Some(ref base) = repo.base_branch {
+        return Ok(Some(base.clone()));
+    }
+
+    match git::default_branch(&repo.path, repo.default_remote.as_deref()).await {
         Ok(branch) => Ok(Some(branch)),
         Err(_) => Ok(None),
     }
+}
+
+#[tauri::command]
+pub async fn list_git_remotes(
+    repo_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
+    let repo = db
+        .get_repository(&repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Repository not found")?;
+    git::list_remotes(&repo.path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_git_remote_branches(
+    repo_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
+    let repo = db
+        .get_repository(&repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Repository not found")?;
+    git::list_remote_tracking_branches(&repo.path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
