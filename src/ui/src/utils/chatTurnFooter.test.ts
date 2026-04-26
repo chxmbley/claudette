@@ -15,6 +15,7 @@ function msg(
   return {
     id,
     workspace_id: "ws",
+    chat_session_id: "sess",
     role,
     content,
     cost_usd: null,

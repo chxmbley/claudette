@@ -1,5 +1,4 @@
 import React, { createContext, memo, useContext, useEffect, useRef, useState, useMemo, useCallback } from "react";
-import { isAgentBusy } from "../../utils/agentStatus";
 import { HighlightedMessageMarkdown } from "./HighlightedMessageMarkdown";
 import { HighlightedPlainText } from "./HighlightedPlainText";
 import { ChatSearchBar } from "./ChatSearchBar";
@@ -8,7 +7,7 @@ import { useAppStore } from "../../stores/useAppStore";
 import type { ToolActivity, CompletedTurn } from "../../stores/useAppStore";
 import {
   loadChatHistory,
-  loadAttachmentsForWorkspace,
+  loadAttachmentsForSession,
   readFileAsBase64,
   listCheckpoints,
   loadCompletedTurns,
@@ -99,6 +98,7 @@ import {
   parseSyntheticSummarySentinel,
 } from "../../utils/compactionSentinel";
 import { PanelToggles } from "../shared/PanelToggles";
+import { SessionTabs } from "./SessionTabs";
 import { deriveTasks, processActivities, turnHasTaskActivity, hasTaskActivity } from "../../hooks/useTaskTracker";
 import type { TaskTrackerResult, TrackedTask } from "../../hooks/useTaskTracker";
 import { ScrollToBottomPill } from "./ScrollToBottomPill";
@@ -250,6 +250,11 @@ const EMPTY_ATTACHMENTS: ChatAttachment[] = [];
 
 export function ChatPanel() {
   const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId);
+  const activeSessionId = useAppStore((s) =>
+    s.selectedWorkspaceId
+      ? s.selectedSessionIdByWorkspaceId[s.selectedWorkspaceId] ?? null
+      : null,
+  );
   const workspaces = useAppStore((s) => s.workspaces);
   const repositories = useAppStore((s) => s.repositories);
   const chatMessages = useAppStore((s) => s.chatMessages);
@@ -338,7 +343,7 @@ export function ChatPanel() {
   // it's a function of the platform / webview capabilities. Compute once.
   const shareSupported = useMemo(() => isShareSupported(), []);
 
-  // Prompt history: stores past user inputs per workspace.
+  // Prompt history: stores past user inputs per session.
   const historyRef = useRef<Record<string, string[]>>({});
   const historyIndexRef = useRef(-1);
   const draftRef = useRef("");
@@ -348,52 +353,57 @@ export function ChatPanel() {
   const ws = workspaces.find((w) => w.id === selectedWorkspaceId);
   const repo = repositories.find((r) => r.id === ws?.repository_id);
   const defaultBranch = repo ? defaultBranchesMap[repo.id] : undefined;
-  const messages = selectedWorkspaceId
-    ? chatMessages[selectedWorkspaceId] || []
+  const messages = activeSessionId
+    ? chatMessages[activeSessionId] || []
     : [];
   // Subscribe only to boolean — avoids re-render on every streaming character
   const hasStreaming = useAppStore(
-    (s) => !!(selectedWorkspaceId && s.streamingContent[selectedWorkspaceId])
+    (s) => !!(activeSessionId && s.streamingContent[activeSessionId])
   );
   const hasPendingTypewriter = useAppStore(
-    (s) => !!(selectedWorkspaceId && s.pendingTypewriter[selectedWorkspaceId])
+    (s) => !!(activeSessionId && s.pendingTypewriter[activeSessionId])
   );
   const hasThinking = useAppStore(
-    (s) => !!(selectedWorkspaceId && s.streamingThinking[selectedWorkspaceId])
+    (s) => !!(activeSessionId && s.streamingThinking[activeSessionId])
   );
   const showThinkingBlocks = useAppStore(
-    (s) => selectedWorkspaceId ? s.showThinkingBlocks[selectedWorkspaceId] === true : false
+    (s) => activeSessionId ? s.showThinkingBlocks[activeSessionId] === true : false
   );
   // Subscribe only to count — avoids re-render on tool activity content changes
   const activitiesCount = useAppStore(
-    (s) => (selectedWorkspaceId ? (s.toolActivities[selectedWorkspaceId] || []).length : 0)
+    (s) => (activeSessionId ? (s.toolActivities[activeSessionId] || []).length : 0)
   );
   const completedTurnsCount = useAppStore(
-    (s) => (selectedWorkspaceId ? (s.completedTurns[selectedWorkspaceId] || []).length : 0)
+    (s) => (activeSessionId ? (s.completedTurns[activeSessionId] || []).length : 0)
   );
   const permissionLevelMap = useAppStore((s) => s.permissionLevel);
   const setPermissionLevel = useAppStore((s) => s.setPermissionLevel);
-  const permissionLevel = selectedWorkspaceId
-    ? permissionLevelMap[selectedWorkspaceId] ?? "full"
+  const permissionLevel = activeSessionId
+    ? permissionLevelMap[activeSessionId] ?? "full"
     : "full";
   const pendingQuestion = useAppStore(
-    (s) => (selectedWorkspaceId ? s.agentQuestions[selectedWorkspaceId] ?? null : null)
+    (s) => (activeSessionId ? s.agentQuestions[activeSessionId] ?? null : null)
   );
   const clearAgentQuestion = useAppStore((s) => s.clearAgentQuestion);
   const finishTypewriterDrainTop = useAppStore((s) => s.finishTypewriterDrain);
   const pendingPlan = useAppStore(
-    (s) => (selectedWorkspaceId ? s.planApprovals[selectedWorkspaceId] ?? null : null)
+    (s) => (activeSessionId ? s.planApprovals[activeSessionId] ?? null : null)
   );
   const clearPlanApproval = useAppStore((s) => s.clearPlanApproval);
   const setPlanMode = useAppStore((s) => s.setPlanMode);
   const queuedMessage = useAppStore(
-    (s) => (selectedWorkspaceId ? s.queuedMessages[selectedWorkspaceId] ?? null : null)
+    (s) => (activeSessionId ? s.queuedMessages[activeSessionId] ?? null : null)
   );
   const setQueuedMessage = useAppStore((s) => s.setQueuedMessage);
   const clearQueuedMessage = useAppStore((s) => s.clearQueuedMessage);
   const addWorkspace = useAppStore((s) => s.addWorkspace);
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
-  const isRunning = isAgentBusy(ws?.agent_status);
+  const activeSessionStatus = useAppStore((s) => {
+    if (!activeSessionId || !selectedWorkspaceId) return "Idle" as const;
+    const sessions = s.sessionsByWorkspace[selectedWorkspaceId];
+    return sessions?.find((sess) => sess.id === activeSessionId)?.agent_status ?? "Idle" as const;
+  });
+  const isRunning = activeSessionStatus === "Running";
 
   const isRemote = !!ws?.remote_connection_id;
 
@@ -441,15 +451,15 @@ export function ChatPanel() {
 
   const formatElapsed = formatElapsedSeconds;
 
-  // Load persisted permission level when workspace changes.
+  // Load persisted permission level when the active session changes.
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
+    if (!activeSessionId) return;
     let cancelled = false;
-    getAppSetting(`permission_level:${selectedWorkspaceId}`)
+    getAppSetting(`permission_level:${activeSessionId}`)
       .then((val) => {
         if (cancelled) return;
         if (val === "readonly" || val === "standard" || val === "full") {
-          setPermissionLevel(selectedWorkspaceId, val);
+          setPermissionLevel(activeSessionId, val);
         }
       })
       .catch((err) => {
@@ -458,28 +468,30 @@ export function ChatPanel() {
     return () => {
       cancelled = true;
     };
-  }, [selectedWorkspaceId, setPermissionLevel]);
+  }, [activeSessionId, setPermissionLevel]);
 
-  // Load chat history when workspace changes, seed prompt history from it.
+  // Load chat history when the active session changes, seed prompt history from it.
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
+    if (!activeSessionId || !selectedWorkspaceId) return;
     let cancelled = false;
     setError(null);
     historyIndexRef.current = -1;
     draftRef.current = "";
 
-    const currentWs = useAppStore.getState().workspaces.find((w) => w.id === selectedWorkspaceId);
+    const currentWs = useAppStore
+      .getState()
+      .workspaces.find((w) => w.id === selectedWorkspaceId);
+    const sessionId = activeSessionId;
     const loadHistory = currentWs?.remote_connection_id
       ? sendRemoteCommand(currentWs.remote_connection_id, "load_chat_history", {
-          workspace_id: selectedWorkspaceId,
+          chat_session_id: sessionId,
         }).then((data) => (data as { messages?: ChatMessage[] })?.messages ?? data as ChatMessage[])
-      : loadChatHistory(selectedWorkspaceId);
+      : loadChatHistory(sessionId);
 
-    const wsId = selectedWorkspaceId;
     const isLocal = !currentWs?.remote_connection_id;
 
     debugChat("ChatPanel", "load-history:start", {
-      wsId,
+      sessionId,
       isLocal,
       agentStatus: currentWs?.agent_status ?? null,
     });
@@ -493,13 +505,13 @@ export function ChatPanel() {
           (m) => m.role !== "Assistant" || m.content.trim() !== "" || !!m.thinking
         );
         debugChat("ChatPanel", "load-history:success", {
-          wsId,
+          sessionId,
           rawMessageCount: msgs.length,
           filteredMessageCount: filtered.length,
           messageIds: filtered.map((msg) => msg.id),
         });
-        setChatMessages(wsId, filtered);
-        historyRef.current[wsId] = filtered
+        setChatMessages(sessionId, filtered);
+        historyRef.current[sessionId] = filtered
           .filter((m) => m.role === "User")
           .map((m) => m.content);
         // Seed the ContextMeter from the last assistant message's per-call
@@ -507,17 +519,17 @@ export function ChatPanel() {
         // clear any stale value so the meter hides.
         const callUsage = extractLatestCallUsage(filtered);
         const store = useAppStore.getState();
-        if (callUsage) store.setLatestTurnUsage(wsId, callUsage);
-        else store.clearLatestTurnUsage(wsId);
+        if (callUsage) store.setLatestTurnUsage(sessionId, callUsage);
+        else store.clearLatestTurnUsage(sessionId);
         // Phase 3: seed compactionEvents by scanning for COMPACTION: sentinels.
-        store.setCompactionEvents(wsId, extractCompactionEvents(filtered));
+        store.setCompactionEvents(sessionId, extractCompactionEvents(filtered));
 
-        // Load attachments for this workspace's messages.
+        // Load attachments for this session's messages.
         if (isLocal) {
-          loadAttachmentsForWorkspace(wsId)
+          loadAttachmentsForSession(sessionId)
             .then((atts) => {
               if (cancelled) return;
-              useAppStore.getState().setChatAttachments(wsId, atts);
+              useAppStore.getState().setChatAttachments(sessionId, atts);
             })
             .catch((e) => console.error("Failed to load attachments:", e));
         }
@@ -526,26 +538,27 @@ export function ChatPanel() {
         // Skip if the agent is currently running — the in-memory state from
         // finalizeTurn() is more current than the DB and must not be overwritten.
         if (isLocal) {
-          const ws = useAppStore.getState().workspaces.find((w) => w.id === wsId);
-          const isRunning = isAgentBusy(ws?.agent_status);
+          const sessions = useAppStore.getState().sessionsByWorkspace[selectedWorkspaceId] ?? [];
+          const thisSession = sessions.find((s) => s.id === sessionId);
+          const isRunning = thisSession?.agent_status === "Running";
           debugChat("ChatPanel", "load-completed-turns:gate", {
-            wsId,
+            sessionId,
             isRunning,
-            currentCompletedTurnIds: (useAppStore.getState().completedTurns[wsId] || []).map(
+            currentCompletedTurnIds: (useAppStore.getState().completedTurns[sessionId] || []).map(
               (turn) => turn.id
             ),
           });
           if (!isRunning) {
-            loadCompletedTurns(wsId)
+            loadCompletedTurns(sessionId)
               .then((turnData) => {
                 if (cancelled) return;
                 const turns = reconstructCompletedTurns(filtered, turnData);
                 debugChat("ChatPanel", "load-completed-turns:success", {
-                  wsId,
+                  sessionId,
                   dbTurnIds: turnData.map((turn) => turn.checkpoint_id),
                   reconstructedTurnIds: turns.map((turn) => turn.id),
                 });
-                hydrateCompletedTurns(wsId, turns);
+                hydrateCompletedTurns(sessionId, turns);
               })
               .catch((e) => console.error("Failed to load completed turns:", e));
           }
@@ -556,10 +569,10 @@ export function ChatPanel() {
     // Load checkpoints for rollback support.
     if (isLocal) {
       const setCheckpoints = useAppStore.getState().setCheckpoints;
-      listCheckpoints(wsId)
+      listCheckpoints(sessionId)
         .then((cps) => {
           if (cancelled) return;
-          setCheckpoints(wsId, cps);
+          setCheckpoints(sessionId, cps);
         })
         .catch((e) => console.error("Failed to load checkpoints:", e));
     }
@@ -567,25 +580,25 @@ export function ChatPanel() {
     return () => {
       cancelled = true;
     };
-  }, [selectedWorkspaceId, setChatMessages, hydrateCompletedTurns]);
+  }, [activeSessionId, selectedWorkspaceId, setChatMessages, hydrateCompletedTurns]);
 
-  // Scroll to bottom unconditionally on workspace switch.
+  // Scroll to bottom unconditionally on session switch.
   useEffect(() => {
-    if (selectedWorkspaceId) scrollToBottom();
-  }, [selectedWorkspaceId, scrollToBottom]);
+    if (activeSessionId) scrollToBottom();
+  }, [activeSessionId, scrollToBottom]);
 
   // Auto-scroll when new content arrives — respects user intent via useStickyScroll.
   // Only scrolls if the user is already at/near the bottom.
   const prevMsgCountRef = useRef<Record<string, number>>({});
   useEffect(() => {
-    const wsId = selectedWorkspaceId;
-    if (!wsId) return;
-    const prev = prevMsgCountRef.current[wsId] ?? 0;
+    const sid = activeSessionId;
+    if (!sid) return;
+    const prev = prevMsgCountRef.current[sid] ?? 0;
     const cur = messages.length;
-    prevMsgCountRef.current[wsId] = cur;
+    prevMsgCountRef.current[sid] = cur;
     // Only trigger on genuinely new messages (count increase), not DB rehydration.
     if (cur > prev) handleContentChanged();
-  }, [messages.length, selectedWorkspaceId, handleContentChanged]);
+  }, [messages.length, activeSessionId, handleContentChanged]);
 
   useEffect(() => {
     if (completedTurnsCount > 0 || activitiesCount > 0 || pendingQuestion || pendingPlan) {
@@ -594,8 +607,9 @@ export function ChatPanel() {
   }, [completedTurnsCount, activitiesCount, pendingQuestion, pendingPlan, handleContentChanged]);
 
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
+    if (!activeSessionId) return;
     debugChat("ChatPanel", "state", {
+      sessionId: activeSessionId,
       wsId: selectedWorkspaceId,
       isRunning,
       messageCount: messages.length,
@@ -604,6 +618,7 @@ export function ChatPanel() {
       hasStreaming,
     });
   }, [
+    activeSessionId,
     selectedWorkspaceId,
     isRunning,
     messages.length,
@@ -619,14 +634,14 @@ export function ChatPanel() {
     attachments?: AttachmentInput[],
   ) => void) | null>(null);
   useEffect(() => {
-    if (isRunning || !selectedWorkspaceId || !queuedMessage) return;
+    if (isRunning || !activeSessionId || !queuedMessage) return;
     // Agent just finished — dispatch the queued message.
     const { content, mentionedFiles, attachments } = queuedMessage;
-    clearQueuedMessage(selectedWorkspaceId);
+    clearQueuedMessage(activeSessionId);
     const filesSet = mentionedFiles?.length ? new Set(mentionedFiles) : undefined;
     // Use a microtask to avoid calling handleSend during render.
     queueMicrotask(() => handleSendRef.current?.(content, filesSet, attachments));
-  }, [isRunning, selectedWorkspaceId, queuedMessage, clearQueuedMessage]);
+  }, [isRunning, activeSessionId, queuedMessage, clearQueuedMessage]);
 
   if (!ws) return null;
 
@@ -636,7 +651,13 @@ export function ChatPanel() {
     attachments?: AttachmentInput[],
   ) => {
     let trimmed = content.trim();
-    if ((!trimmed && !attachments?.length) || !selectedWorkspaceId) return;
+    if (
+      (!trimmed && !attachments?.length) ||
+      !selectedWorkspaceId ||
+      !activeSessionId
+    )
+      return;
+    const sessionId = activeSessionId;
 
     // Convert mentioned files set to array for the backend.
     const mentionedFilesArray = mentionedFiles?.size
@@ -698,15 +719,15 @@ export function ChatPanel() {
       if (nativeHandler) {
         const workspaceId = selectedWorkspaceId;
         const state = useAppStore.getState();
-        const currentModel = state.selectedModel[workspaceId] ?? "opus";
+        const currentModel = state.selectedModel[sessionId] ?? "opus";
         const currentPermission: PermissionLevel =
-          state.permissionLevel[workspaceId] ?? "full";
-        const currentPlanMode = state.planMode[workspaceId] ?? false;
-        const currentFastMode = state.fastMode[workspaceId] ?? false;
-        const currentThinking = state.thinkingEnabled[workspaceId] ?? false;
-        const currentChrome = state.chromeEnabled[workspaceId] ?? false;
-        const currentEffort = state.effortLevel[workspaceId] ?? "auto";
-        const planFilePath = findLatestPlanFilePath(workspaceId);
+          state.permissionLevel[sessionId] ?? "full";
+        const currentPlanMode = state.planMode[sessionId] ?? false;
+        const currentFastMode = state.fastMode[sessionId] ?? false;
+        const currentThinking = state.thinkingEnabled[sessionId] ?? false;
+        const currentChrome = state.chromeEnabled[sessionId] ?? false;
+        const currentEffort = state.effortLevel[sessionId] ?? "auto";
+        const planFilePath = findLatestPlanFilePath(sessionId);
         const agentStatusLabel =
           typeof ws.agent_status === "string"
             ? ws.agent_status
@@ -714,9 +735,10 @@ export function ChatPanel() {
         const isRemoteWorkspace = !!ws.remote_connection_id;
 
         const addLocalMessage = (text: string) => {
-          addChatMessage(workspaceId, {
+          addChatMessage(sessionId, {
             id: crypto.randomUUID(),
             workspace_id: workspaceId,
+            chat_session_id: sessionId,
             role: "System",
             content: text,
             cost_usd: null,
@@ -731,22 +753,22 @@ export function ChatPanel() {
         };
 
         const setSelectedModelBound = (nextModel: string) =>
-          applySelectedModel(workspaceId, nextModel);
+          applySelectedModel(sessionId, nextModel);
 
         const setPermissionLevelBound = async (level: PermissionLevel) => {
           const previous =
-            useAppStore.getState().permissionLevel[workspaceId] ?? "full";
-          useAppStore.getState().setPermissionLevel(workspaceId, level);
+            useAppStore.getState().permissionLevel[sessionId] ?? "full";
+          useAppStore.getState().setPermissionLevel(sessionId, level);
           try {
-            await setAppSetting(`permission_level:${workspaceId}`, level);
+            await setAppSetting(`permission_level:${sessionId}`, level);
           } catch (err) {
-            useAppStore.getState().setPermissionLevel(workspaceId, previous);
+            useAppStore.getState().setPermissionLevel(sessionId, previous);
             throw err;
           }
         };
 
         const setPlanModeBound = (enabled: boolean) => {
-          useAppStore.getState().setPlanMode(workspaceId, enabled);
+          useAppStore.getState().setPlanMode(sessionId, enabled);
         };
 
         // Route plan-file reads through the remote server for remote
@@ -772,19 +794,19 @@ export function ChatPanel() {
             );
           }
           const store = useAppStore.getState();
-          const messages = await clearConversation(workspaceId, restoreFiles);
-          store.rollbackConversation(workspaceId, "__clear__", messages);
-          loadCompletedTurns(workspaceId)
+          const messages = await clearConversation(sessionId, restoreFiles);
+          store.rollbackConversation(sessionId, workspaceId, "__clear__", messages);
+          loadCompletedTurns(sessionId)
             .then((turnData) => {
               const turns = reconstructCompletedTurns(messages, turnData);
-              useAppStore.getState().setCompletedTurns(workspaceId, turns);
+              useAppStore.getState().setCompletedTurns(sessionId, turns);
             })
             .catch((err) =>
               console.error("Failed to reload turns after /clear:", err),
             );
-          loadAttachmentsForWorkspace(workspaceId)
+          loadAttachmentsForSession(sessionId)
             .then((atts) =>
-              useAppStore.getState().setChatAttachments(workspaceId, atts),
+              useAppStore.getState().setChatAttachments(sessionId, atts),
             )
             .catch((err) =>
               console.error("Failed to reload attachments after /clear:", err),
@@ -863,7 +885,7 @@ export function ChatPanel() {
     // Queued messages are auto-sent when the current turn finishes.
     if (isRunning) {
       setQueuedMessage(
-        selectedWorkspaceId,
+        sessionId,
         trimmed,
         mentionedFilesArray,
         attachments,
@@ -876,23 +898,22 @@ export function ChatPanel() {
     // stuck typewriter drain from the previous turn so the completed message
     // doesn't stay hidden behind pendingTypewriter across turns (the
     // drain-complete effect cannot fire while isStreaming flips back to true).
-    if (selectedWorkspaceId) {
-      clearAgentQuestion(selectedWorkspaceId);
-      clearPlanApproval(selectedWorkspaceId);
-      finishTypewriterDrainTop(selectedWorkspaceId);
-    }
+    clearAgentQuestion(sessionId);
+    clearPlanApproval(sessionId);
+    finishTypewriterDrainTop(sessionId);
 
     setError(null);
 
     // Push to prompt history.
-    const history = (historyRef.current[selectedWorkspaceId] ??= []);
+    const history = (historyRef.current[sessionId] ??= []);
     history.push(trimmed);
     historyIndexRef.current = -1;
     draftRef.current = "";
     const optimisticMsgId = crypto.randomUUID();
-    addChatMessage(selectedWorkspaceId, {
+    addChatMessage(sessionId, {
       id: optimisticMsgId,
       workspace_id: selectedWorkspaceId,
+      chat_session_id: sessionId,
       role: "User",
       content: trimmed,
       cost_usd: null,
@@ -917,49 +938,55 @@ export function ChatPanel() {
         height: null,
         size_bytes: Math.ceil(a.data_base64.length * 0.75),
       }));
-      useAppStore.getState().addChatAttachments(selectedWorkspaceId, optimisticAtts);
+      useAppStore.getState().addChatAttachments(sessionId, optimisticAtts);
     }
+    // Keep both the workspace aggregate AND the per-session status fresh.
+    // The tab icon, sidebar badge, and ChatToolbar disable-state all read
+    // session-level status; the workspace row still drives tray + unread.
     updateWorkspace(selectedWorkspaceId, { agent_status: "Running" });
     useAppStore.getState().setPromptStartTime(selectedWorkspaceId, Date.now());
+    useAppStore.getState().updateChatSession(sessionId, {
+      agent_status: "Running",
+    });
     useAppStore.getState().clearUnreadCompletion(selectedWorkspaceId);
 
     try {
       if (ws?.remote_connection_id) {
         // Route to remote server via WebSocket.
         const state = useAppStore.getState();
-        const selectedModel = state.selectedModel[selectedWorkspaceId] || null;
+        const selectedModel = state.selectedModel[sessionId] || null;
         const disable1mContext = shouldDisable1mContext(selectedModel);
         const effort = resolveUltrathinkEffort(
           trimmed,
-          state.effortLevel[selectedWorkspaceId],
+          state.effortLevel[sessionId],
         );
         await sendRemoteCommand(ws.remote_connection_id, "send_chat_message", {
-          workspace_id: selectedWorkspaceId,
+          chat_session_id: sessionId,
           content: trimmed,
           mentioned_files: mentionedFilesArray,
           permission_level: permissionLevel,
-          model: selectedModel,
-          fast_mode: state.fastMode[selectedWorkspaceId] || false,
-          thinking_enabled: state.thinkingEnabled[selectedWorkspaceId] || false,
-          plan_mode: state.planMode[selectedWorkspaceId] || false,
-          effort: effort || null,
-          chrome_enabled: state.chromeEnabled[selectedWorkspaceId] || false,
+          model: state.selectedModel[sessionId] || null,
+          fast_mode: state.fastMode[sessionId] || false,
+          thinking_enabled: state.thinkingEnabled[sessionId] || false,
+          plan_mode: state.planMode[sessionId] || false,
+          effort: effort ?? null,
+          chrome_enabled: state.chromeEnabled[sessionId] || false,
           disable_1m_context: disable1mContext,
         });
       } else {
         const state = useAppStore.getState();
-        const model = state.selectedModel[selectedWorkspaceId] || undefined;
-        const fastMode = state.fastMode[selectedWorkspaceId] || false;
-        const thinkingEnabled = state.thinkingEnabled[selectedWorkspaceId] || false;
-        const planMode = state.planMode[selectedWorkspaceId] || false;
+        const model = state.selectedModel[sessionId] || undefined;
+        const fastMode = state.fastMode[sessionId] || false;
+        const thinkingEnabled = state.thinkingEnabled[sessionId] || false;
+        const planMode = state.planMode[sessionId] || false;
         const effort = resolveUltrathinkEffort(
           trimmed,
-          state.effortLevel[selectedWorkspaceId],
+          state.effortLevel[sessionId],
         );
-        const chromeEnabled = state.chromeEnabled[selectedWorkspaceId] || false;
+        const chromeEnabled = state.chromeEnabled[sessionId] || false;
         const disable1mContext = shouldDisable1mContext(model ?? null);
         await sendChatMessage(
-          selectedWorkspaceId,
+          sessionId,
           trimmed,
           mentionedFilesArray,
           permissionLevel,
@@ -986,18 +1013,22 @@ export function ChatPanel() {
   handleSendRef.current = handleSend;
 
   const handleStop = async () => {
-    if (!selectedWorkspaceId) return;
+    if (!activeSessionId || !selectedWorkspaceId) return;
+    const sessionId = activeSessionId;
     // Clear queued message — stopping means the user wants to take control.
-    clearQueuedMessage(selectedWorkspaceId);
+    clearQueuedMessage(sessionId);
     try {
       if (ws?.remote_connection_id) {
         await sendRemoteCommand(ws.remote_connection_id, "stop_agent", {
-          workspace_id: selectedWorkspaceId,
+          chat_session_id: sessionId,
         });
       } else {
-        await stopAgent(selectedWorkspaceId);
+        await stopAgent(sessionId);
       }
-      updateWorkspace(selectedWorkspaceId, { agent_status: "Stopped" });
+      // Don't write workspace-level agent_status here: stop is per-session
+      // and other sessions in the workspace may still be running. The
+      // backend ProcessExited event flips this session to Stopped, and
+      // useAgentStream re-derives the workspace aggregate from sessions.
     } catch (e) {
       console.error("stopAgent failed:", e);
     }
@@ -1031,6 +1062,7 @@ export function ChatPanel() {
           <PanelToggles />
         </div>
       </div>
+      {selectedWorkspaceId && <SessionTabs workspaceId={selectedWorkspaceId} />}
 
       <div className={styles.messagesWrapper}>
         {selectedWorkspaceId && (
@@ -1047,10 +1079,11 @@ export function ChatPanel() {
             </div>
           ) : (
             <>
-              {selectedWorkspaceId && (
+              {activeSessionId && selectedWorkspaceId && (
                 <MessagesWithTurns
                   messages={messages}
                   workspaceId={selectedWorkspaceId}
+                  sessionId={activeSessionId}
                   isRunning={isRunning}
                   onForkTurn={isRemote ? undefined : handleFork}
                   onAttachmentContextMenu={openAttachmentMenu}
@@ -1059,44 +1092,44 @@ export function ChatPanel() {
                 />
               )}
 
-              {selectedWorkspaceId && hasThinking && showThinkingBlocks && (
+              {activeSessionId && hasThinking && showThinkingBlocks && (
                 <StreamingThinkingBlock
-                  workspaceId={selectedWorkspaceId}
+                  sessionId={activeSessionId}
                   isStreaming={isRunning ?? false}
                   searchQuery={searchQuery}
                 />
               )}
 
-              {selectedWorkspaceId && (hasStreaming || hasPendingTypewriter) && (
-                <StreamingMessage workspaceId={selectedWorkspaceId} searchQuery={searchQuery} />
+              {activeSessionId && (hasStreaming || hasPendingTypewriter) && (
+                <StreamingMessage
+                  sessionId={activeSessionId}
+                  isStreaming={isRunning ?? false}
+                  searchQuery={searchQuery}
+                />
               )}
 
-              {selectedWorkspaceId && activitiesCount > 0 && (
+              {activeSessionId && activitiesCount > 0 && (
                 <ToolActivitiesSection
-                  workspaceId={selectedWorkspaceId}
+                  sessionId={activeSessionId}
                   isRunning={isRunning ?? false}
                   searchQuery={searchQuery}
                 />
               )}
 
-              {selectedWorkspaceId && (
-                <CurrentTurnTaskProgress workspaceId={selectedWorkspaceId} />
+              {activeSessionId && (
+                <CurrentTurnTaskProgress sessionId={activeSessionId} />
               )}
 
               {pendingQuestion && (
                 <AgentQuestionCard
                   question={pendingQuestion}
                   onRespond={async (answers) => {
-                    if (!selectedWorkspaceId) return;
-                    const wsId = selectedWorkspaceId;
+                    if (!activeSessionId) return;
+                    const sid = activeSessionId;
                     const toolUseId = pendingQuestion.toolUseId;
-                    // Send first; only clear the card on success. If the
-                    // invoke fails (IPC error, session reset, …) the card
-                    // stays visible so the user can retry instead of leaving
-                    // the CLI blocked on an unanswerable can_use_tool.
                     try {
-                      await submitAgentAnswer(wsId, toolUseId, answers);
-                      clearAgentQuestion(wsId);
+                      await submitAgentAnswer(sid, toolUseId, answers);
+                      clearAgentQuestion(sid);
                     } catch (e) {
                       console.error("Failed to submit agent answer:", e);
                       setError(String(e));
@@ -1110,18 +1143,18 @@ export function ChatPanel() {
                   approval={pendingPlan}
                   remoteConnectionId={ws?.remote_connection_id ?? undefined}
                   onRespond={async (approved, reason) => {
-                    if (!selectedWorkspaceId) return;
-                    const wsId = selectedWorkspaceId;
+                    if (!activeSessionId) return;
+                    const sid = activeSessionId;
                     const toolUseId = pendingPlan.toolUseId;
                     try {
-                      await submitPlanApproval(wsId, toolUseId, approved, reason);
-                      clearPlanApproval(wsId);
+                      await submitPlanApproval(sid, toolUseId, approved, reason);
+                      clearPlanApproval(sid);
                       // User action is authoritative for ending the plan
                       // phase — flip planMode off so the next turn triggers
                       // drift detection (backend `session_exited_plan` covers
                       // this already, but clearing the UI state keeps the
                       // toolbar chip in sync).
-                      setPlanMode(wsId, false);
+                      setPlanMode(sid, false);
                     } catch (e) {
                       console.error("Failed to submit plan approval:", e);
                       setError(String(e));
@@ -1149,13 +1182,13 @@ export function ChatPanel() {
                 </div>
               )}
 
-              {queuedMessage && selectedWorkspaceId && (
+              {queuedMessage && activeSessionId && (
                 <div className={styles.queuedMessage}>
                   <span className={styles.queuedLabel}>Queued</span>
                   <span className={styles.queuedContent}>{queuedMessage.content}</span>
                   <button
                     className={styles.queuedCancel}
-                    onClick={() => clearQueuedMessage(selectedWorkspaceId)}
+                    onClick={() => clearQueuedMessage(activeSessionId)}
                     title="Cancel queued message"
                   >
                     ×
@@ -1181,6 +1214,7 @@ export function ChatPanel() {
         isRunning={isRunning}
         isRemote={!!ws?.remote_connection_id}
         selectedWorkspaceId={selectedWorkspaceId!}
+        sessionId={activeSessionId!}
         repoId={repo?.id}
         projectPath={repo?.path}
         historyRef={historyRef}
@@ -1271,16 +1305,16 @@ export function ChatPanel() {
  * re-rendering ChatPanel on every thinking delta.
  */
 const StreamingThinkingBlock = memo(function StreamingThinkingBlock({
-  workspaceId,
+  sessionId,
   isStreaming,
   searchQuery,
 }: {
-  workspaceId: string;
+  sessionId: string;
   isStreaming: boolean;
   searchQuery: string;
 }) {
   const thinking = useAppStore(
-    (s) => s.streamingThinking[workspaceId] || ""
+    (s) => s.streamingThinking[sessionId] || ""
   );
   if (!thinking) return null;
   return (
@@ -1301,20 +1335,19 @@ const StreamingThinkingBlock = memo(function StreamingThinkingBlock({
  * completes).
  */
 const StreamingMessage = memo(function StreamingMessage({
-  workspaceId,
+  sessionId,
+  isStreaming,
   searchQuery,
 }: {
-  workspaceId: string;
+  sessionId: string;
+  isStreaming: boolean;
   searchQuery: string;
 }) {
   const streaming = useAppStore(
-    (s) => s.streamingContent[workspaceId] || ""
+    (s) => s.streamingContent[sessionId] || ""
   );
   const pendingText = useAppStore(
-    (s) => s.pendingTypewriter[workspaceId]?.text ?? ""
-  );
-  const isStreaming = useAppStore(
-    (s) => isAgentBusy(s.workspaces.find((w) => w.id === workspaceId)?.agent_status)
+    (s) => s.pendingTypewriter[sessionId]?.text ?? ""
   );
   const finishTypewriterDrain = useAppStore((s) => s.finishTypewriterDrain);
   const { handleContentChanged } = useContext(ScrollContext);
@@ -1332,9 +1365,9 @@ const StreamingMessage = memo(function StreamingMessage({
   // unmounts atomically with the completed message unhiding.
   useEffect(() => {
     if (!showCaret && !streaming && pendingText) {
-      finishTypewriterDrain(workspaceId);
+      finishTypewriterDrain(sessionId);
     }
-  }, [showCaret, streaming, pendingText, workspaceId, finishTypewriterDrain]);
+  }, [showCaret, streaming, pendingText, sessionId, finishTypewriterDrain]);
 
   if (!displayed) return null;
 
@@ -1652,6 +1685,7 @@ const EMPTY_CHECKPOINTS: import("../../types/checkpoint").ConversationCheckpoint
 
 type RollbackModalData = {
   workspaceId: string;
+  sessionId: string;
   checkpointId: string | null;
   messageId: string;
   messagePreview: string;
@@ -1662,6 +1696,7 @@ type RollbackModalData = {
 const MessagesWithTurns = memo(function MessagesWithTurns({
   messages,
   workspaceId,
+  sessionId,
   isRunning,
   onForkTurn,
   onAttachmentContextMenu,
@@ -1669,7 +1704,13 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
   searchQuery,
 }: {
   messages: ChatMessage[];
+  /** The enclosing workspace id — forwarded into rollback data so the modal
+   *  can target the correct workspace (distinct from the session id after
+   *  the multi-session refactor). */
   workspaceId: string;
+  /** The active chat session id. All per-conversation store reads (turns,
+   *  checkpoints, attachments, etc.) are now keyed by session id. */
+  sessionId: string;
   isRunning: boolean;
   /** Handler invoked when the user forks a turn. Undefined disables the fork
    *  button (e.g. for remote workspaces where the command cannot run). */
@@ -1693,24 +1734,24 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
   searchQuery: string;
 }) {
   const completedTurns = useAppStore(
-    (s) => s.completedTurns[workspaceId] ?? EMPTY_COMPLETED_TURNS
+    (s) => s.completedTurns[sessionId] ?? EMPTY_COMPLETED_TURNS
   );
   const toggleCompletedTurn = useAppStore((s) => s.toggleCompletedTurn);
   const checkpoints = useAppStore(
-    (s) => s.checkpoints[workspaceId] ?? EMPTY_CHECKPOINTS
+    (s) => s.checkpoints[sessionId] ?? EMPTY_CHECKPOINTS
   );
   const openModal = useAppStore((s) => s.openModal);
   const showThinkingBlocks = useAppStore(
-    (s) => s.showThinkingBlocks[workspaceId] === true
+    (s) => s.showThinkingBlocks[sessionId] === true
   );
   // While the typewriter is finishing the drain after streamingContent cleared,
   // hide the just-added completed assistant message — StreamingMessage renders
   // it in-place, so showing both would duplicate the text.
   const pendingMessageId = useAppStore(
-    (s) => s.pendingTypewriter[workspaceId]?.messageId ?? null
+    (s) => s.pendingTypewriter[sessionId]?.messageId ?? null
   );
   const chatAttachments = useAppStore(
-    (s) => s.chatAttachments[workspaceId] ?? EMPTY_ATTACHMENTS
+    (s) => s.chatAttachments[sessionId] ?? EMPTY_ATTACHMENTS
   );
 
   // Pre-build a Map keyed by message_id for O(1) lookup in the render loop.
@@ -1785,6 +1826,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
       if (!userMsg) return null;
       return {
         workspaceId,
+        sessionId,
         checkpointId: target ? target.id : null,
         messageId: userMsg.id,
         messagePreview: userMsg.content.slice(0, 100),
@@ -1794,7 +1836,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
           : clearAllHasFileChanges(checkpoints),
       };
     },
-    [checkpoints, messages, rollbackCheckpointByIdx, workspaceId],
+    [checkpoints, messages, rollbackCheckpointByIdx, workspaceId, sessionId],
   );
 
   // Joined assistant text per turn, used by the "Copy output" action in the
@@ -1913,6 +1955,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
   useEffect(() => {
     debugChat("MessagesWithTurns", "layout", {
       workspaceId,
+      sessionId,
       messageIds: messages.map((msg) => msg.id),
       turnLayout: completedTurns.map((turn) => ({
         id: turn.id,
@@ -1921,7 +1964,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
         toolCount: turn.activities.length,
       })),
     });
-  }, [workspaceId, messages, completedTurns]);
+  }, [workspaceId, sessionId, messages, completedTurns]);
 
   const renderTurns = (position: number) => {
     const entries = turnsByPosition[position];
@@ -1931,7 +1974,7 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
         key={turn.id}
         turn={turn}
         collapsed={turn.collapsed}
-        onToggle={() => toggleCompletedTurn(workspaceId, globalIdx)}
+        onToggle={() => toggleCompletedTurn(sessionId, globalIdx)}
         taskProgress={taskProgressByTurn.get(globalIdx)}
         assistantText={assistantTextByTurnId.get(turn.id) ?? ""}
         onFork={onForkTurn ? () => onForkTurn(turn.id) : undefined}
@@ -2137,16 +2180,16 @@ const MessagesWithTurns = memo(function MessagesWithTurns({
  * Isolated so streaming text changes don't cause re-renders here.
  */
 const ToolActivitiesSection = memo(function ToolActivitiesSection({
-  workspaceId,
+  sessionId,
   isRunning,
   searchQuery,
 }: {
-  workspaceId: string;
+  sessionId: string;
   isRunning: boolean;
   searchQuery: string;
 }) {
   const activities = useAppStore(
-    (s) => s.toolActivities[workspaceId] ?? EMPTY_ACTIVITIES
+    (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES
   );
   const [collapsed, setCollapsed] = useState(true);
 
@@ -2223,15 +2266,15 @@ const ToolActivitiesSection = memo(function ToolActivitiesSection({
  * the turn finalises (tasks move into CompletedTurn rendering).
  */
 const CurrentTurnTaskProgress = memo(function CurrentTurnTaskProgress({
-  workspaceId,
+  sessionId,
 }: {
-  workspaceId: string;
+  sessionId: string;
 }) {
   const completedTurns = useAppStore(
-    (s) => s.completedTurns[workspaceId] ?? EMPTY_COMPLETED_TURNS
+    (s) => s.completedTurns[sessionId] ?? EMPTY_COMPLETED_TURNS
   );
   const toolActivities = useAppStore(
-    (s) => s.toolActivities[workspaceId] ?? EMPTY_ACTIVITIES
+    (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES
   );
 
   const result = useMemo(
@@ -2281,6 +2324,7 @@ function ChatInputArea({
   isRunning,
   isRemote,
   selectedWorkspaceId,
+  sessionId,
   repoId,
   projectPath,
   historyRef,
@@ -2298,6 +2342,7 @@ function ChatInputArea({
   isRunning: boolean;
   isRemote: boolean;
   selectedWorkspaceId: string;
+  sessionId: string;
   repoId: string | undefined;
   projectPath: string | undefined;
   historyRef: React.MutableRefObject<Record<string, string[]>>;
@@ -2396,23 +2441,23 @@ function ChatInputArea({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [voice.state, voice.cancel]);
 
-  // Per-workspace draft storage: save input when switching away,
+  // Per-session draft storage: save input when switching away,
   // restore when switching back.
   const draftsRef = useRef<Record<string, string>>({});
-  const prevWorkspaceRef = useRef(selectedWorkspaceId);
+  const prevSessionRef = useRef(sessionId);
   useEffect(() => {
-    const prev = prevWorkspaceRef.current;
-    if (prev !== selectedWorkspaceId) {
-      // Save draft for the workspace we're leaving.
+    const prev = prevSessionRef.current;
+    if (prev !== sessionId) {
+      // Save draft for the session we're leaving.
       draftsRef.current[prev] = chatInput;
-      // Restore draft for the workspace we're entering.
-      setChatInput(draftsRef.current[selectedWorkspaceId] ?? "");
-      prevWorkspaceRef.current = selectedWorkspaceId;
-      // Reset file picker and attachment state for new workspace.
+      // Restore draft for the session we're entering.
+      setChatInput(draftsRef.current[sessionId] ?? "");
+      prevSessionRef.current = sessionId;
+      // Reset file picker and attachment state for new session.
       setFilesLoaded(false);
       setWorkspaceFiles([]);
       mentionedFilesRef.current = new Set();
-      // Clear staged attachments so they don't leak across workspaces.
+      // Clear staged attachments so they don't leak across sessions.
       setPendingAttachments((prev) => {
         for (const a of prev) {
           if (a.preview_url.startsWith("blob:")) URL.revokeObjectURL(a.preview_url);
@@ -2421,12 +2466,12 @@ function ChatInputArea({
       });
       voice.cancel();
     }
-  }, [selectedWorkspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-focus the textarea when switching or creating workspaces.
+  // Auto-focus the textarea when switching or creating sessions.
   useEffect(() => {
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [selectedWorkspaceId]);
+  }, [sessionId]);
 
   // Consume prefill text (e.g. from rollback) and focus the textarea.
   const chatInputPrefill = useAppStore((s) => s.chatInputPrefill);
@@ -2780,7 +2825,7 @@ function ChatInputArea({
   };
 
   const planMode = useAppStore(
-    (s) => s.planMode[selectedWorkspaceId] ?? false,
+    (s) => s.planMode[sessionId] ?? false,
   );
   const setPlanMode = useAppStore((s) => s.setPlanMode);
 
@@ -2794,7 +2839,7 @@ function ChatInputArea({
     // Shift+Tab: toggle plan mode
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
-      setPlanMode(selectedWorkspaceId, !planMode);
+      setPlanMode(sessionId, !planMode);
       return;
     }
 
@@ -2884,7 +2929,7 @@ function ChatInputArea({
     }
 
     // History navigation with arrow keys
-    const history = historyRef.current[selectedWorkspaceId] ?? [];
+    const history = historyRef.current[sessionId] ?? [];
     if (history.length === 0) return;
 
     if (e.key === "ArrowUp") {
@@ -3056,13 +3101,13 @@ function ChatInputArea({
             )}
           </div>
           <ComposerToolbar
-            workspaceId={selectedWorkspaceId}
+            sessionId={sessionId}
             disabled={isRunning}
           />
         </div>
         <div className={styles.inputControlsRight}>
           <SegmentedMeter
-            workspaceId={selectedWorkspaceId}
+            sessionId={sessionId}
             onClick={() => setContextPopoverOpen((v) => !v)}
           />
           {voice.state === "recording" && (
@@ -3173,7 +3218,7 @@ function ChatInputArea({
           </button>
           {contextPopoverOpen && (
             <ContextPopover
-              workspaceId={selectedWorkspaceId}
+              sessionId={sessionId}
               onClose={() => setContextPopoverOpen(false)}
               onCompact={() => { onSend("/compact"); }}
               onClear={() => { onSend("/clear"); }}
