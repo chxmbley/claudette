@@ -25,6 +25,16 @@ function applyHljsTheme(isLight: boolean): void {
   link.href = isLight ? hljsLightUrl : hljsDarkUrl;
 }
 
+// Fire once at module load — before async settings load and the first React
+// render — so the diff viewer doesn't paint hljs-* tokens against a missing
+// stylesheet. The pre-hydration script in index.html already set data-theme
+// synchronously, which means computed `color-scheme` is correct here.
+if (typeof window !== "undefined" && typeof getComputedStyle === "function") {
+  applyHljsTheme(
+    getComputedStyle(document.documentElement).colorScheme === "light",
+  );
+}
+
 // localStorage key used by index.html's pre-hydration script to set
 // data-theme before React mounts. Keep in sync with that script.
 const THEME_CACHE_KEY = "claudette.theme";
