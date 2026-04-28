@@ -123,6 +123,113 @@ impl ResolvedEnv {
             }
         }
     }
+
+    /// Sources whose error string indicates the user needs to take a
+    /// one-time priming action (run `direnv allow`, `mise trust`, etc.)
+    /// before this provider can contribute env. Heuristic match on the
+    /// stderr text the plugin propagated up — keeps generic export
+    /// failures (malformed TOML, missing CLI) out of the trust-warning
+    /// surface so we don't tell the user to "run `mise trust`" when
+    /// `mise` isn't even installed.
+    pub fn trust_errors(&self) -> Vec<&ResolvedSource> {
+        self.sources
+            .iter()
+            .filter(|s| s.error.as_deref().is_some_and(is_trust_error))
+            .collect()
+    }
+
+    /// Render a markdown system message describing every trust error,
+    /// or `None` when there are none. Each block names the provider, a
+    /// fenced-code-block excerpt of the stderr the plugin captured, and
+    /// a one-line remediation hint pointing at the action the user can
+    /// take.
+    pub fn format_trust_message(&self) -> Option<String> {
+        let errors = self.trust_errors();
+        if errors.is_empty() {
+            return None;
+        }
+        let mut body = String::from(
+            "**Environment setup needed.** One or more env-provider plugins reported a trust/priming error. Until this is resolved, the agent will spawn without the tools and variables this provider would normally contribute, which can cause prompts to fail.\n",
+        );
+        for src in errors {
+            let display = display_name_for(&src.plugin_name);
+            let hint = remediation_hint(&src.plugin_name);
+            let excerpt = excerpt_error(src.error.as_deref().unwrap_or(""));
+            // Fenced block keeps multi-line stderr (and any leading
+            // whitespace direnv/mise emit) from collapsing the list
+            // layout; the indent under the bullet keeps the code block
+            // visually associated with the parent list item.
+            body.push_str(&format!(
+                "\n- **{display}**\n\n    ```\n{excerpt}\n    ```\n\n    {hint}\n"
+            ));
+        }
+        body.push_str(
+            "\nYou can also configure a setup script in **Repo Settings → Setup Script** so future workspaces auto-prime this environment.",
+        );
+        Some(body)
+    }
+}
+
+/// Truncate and re-indent an error string for embedding inside a
+/// markdown fenced code block under a list item. Caps the excerpt at
+/// `MAX_EXCERPT_BYTES` so a runaway stderr (mise/direnv occasionally
+/// dump multi-screen diagnostics) doesn't blow out the chat surface,
+/// and prefixes every line with four spaces so the block stays inside
+/// the parent bullet's indent context.
+fn excerpt_error(error: &str) -> String {
+    const MAX_EXCERPT_BYTES: usize = 800;
+    let trimmed = error.trim_end();
+    let truncated = if trimmed.len() > MAX_EXCERPT_BYTES {
+        // Cut at a UTF-8 char boundary to avoid panicking on non-ASCII.
+        let mut cut = MAX_EXCERPT_BYTES;
+        while cut > 0 && !trimmed.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &trimmed[..cut])
+    } else {
+        trimmed.to_string()
+    };
+    truncated
+        .lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Trust-error heuristic. Matches the stderr substrings that mise and
+/// direnv emit when their config hasn't been allowed yet. Generic
+/// `export:` / `detect:` errors that don't contain any of these
+/// markers fall through and are not surfaced as trust warnings —
+/// notably "permission denied" is intentionally NOT matched, since it
+/// is too broad and would catch unrelated filesystem failures (e.g.
+/// the plugin couldn't read its own config because of POSIX perms).
+fn is_trust_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    ["not trusted", "is blocked", "is not allowed", "untrusted"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn display_name_for(plugin_name: &str) -> &str {
+    match plugin_name {
+        "env-mise" => "mise",
+        "env-direnv" => "direnv",
+        "env-nix-devshell" => "nix",
+        "env-dotenv" => "dotenv",
+        _ => plugin_name,
+    }
+}
+
+fn remediation_hint(plugin_name: &str) -> &'static str {
+    match plugin_name {
+        "env-mise" => {
+            "Run `mise trust` in the worktree, or open the Environment panel and click **Trust**."
+        }
+        "env-direnv" => {
+            "Run `direnv allow` in the worktree, or open the Environment panel and click **Allow**."
+        }
+        _ => "Open the Environment panel for this workspace to inspect and prime this provider.",
+    }
 }
 
 /// Hardcoded precedence for v1. Higher value = wins on key collision.
@@ -785,6 +892,132 @@ mod tests {
             cache.get_fresh(tmp.path(), "env-direnv").is_none(),
             "disable must invalidate the cache entry"
         );
+    }
+
+    fn make_source(name: &str, error: Option<&str>) -> ResolvedSource {
+        ResolvedSource {
+            plugin_name: name.into(),
+            detected: error.is_none(),
+            vars_contributed: 0,
+            cached: false,
+            evaluated_at: SystemTime::now(),
+            error: error.map(|s| s.into()),
+        }
+    }
+
+    #[test]
+    fn trust_errors_match_mise_not_trusted() {
+        let env = ResolvedEnv {
+            vars: Default::default(),
+            sources: vec![make_source(
+                "env-mise",
+                Some("export: mise env failed: mise.toml is not trusted"),
+            )],
+        };
+        let errors = env.trust_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].plugin_name, "env-mise");
+    }
+
+    #[test]
+    fn trust_errors_match_direnv_blocked() {
+        let env = ResolvedEnv {
+            vars: Default::default(),
+            sources: vec![make_source(
+                "env-direnv",
+                Some("export: direnv export failed: .envrc is blocked"),
+            )],
+        };
+        assert_eq!(env.trust_errors().len(), 1);
+    }
+
+    #[test]
+    fn trust_errors_skip_generic_export_failures() {
+        // A malformed mise.toml or missing CLI is a different problem
+        // class — `mise trust` won't fix it, so it must NOT surface as a
+        // trust warning.
+        let env = ResolvedEnv {
+            vars: Default::default(),
+            sources: vec![make_source(
+                "env-mise",
+                Some("export: mise env failed: failed to parse mise.toml"),
+            )],
+        };
+        assert!(env.trust_errors().is_empty());
+    }
+
+    #[test]
+    fn trust_errors_empty_when_no_errors() {
+        let env = ResolvedEnv {
+            vars: Default::default(),
+            sources: vec![make_source("env-mise", None)],
+        };
+        assert!(env.trust_errors().is_empty());
+        assert!(env.format_trust_message().is_none());
+    }
+
+    #[test]
+    fn format_trust_message_lists_each_failing_provider() {
+        let env = ResolvedEnv {
+            vars: Default::default(),
+            sources: vec![
+                make_source("env-mise", Some("export: mise env failed: not trusted")),
+                make_source(
+                    "env-direnv",
+                    Some("export: direnv export failed: is blocked"),
+                ),
+            ],
+        };
+        let body = env
+            .format_trust_message()
+            .expect("trust errors should produce a message");
+        // Names + remediation hints both surface so the user knows what
+        // to run for each failing provider.
+        assert!(body.contains("**mise**"));
+        assert!(body.contains("**direnv**"));
+        assert!(body.contains("`mise trust`"));
+        assert!(body.contains("`direnv allow`"));
+        // Stderr renders inside a fenced code block so multi-line
+        // output can't break the surrounding markdown list.
+        assert!(body.contains("```"));
+        assert!(body.contains("    export: mise env failed: not trusted"));
+        // The closing pointer to repo settings is the durable fix.
+        assert!(body.contains("Repo Settings"));
+    }
+
+    #[test]
+    fn excerpt_error_preserves_short_single_line() {
+        let s = excerpt_error("mise.toml is not trusted");
+        assert_eq!(s, "    mise.toml is not trusted");
+    }
+
+    #[test]
+    fn excerpt_error_indents_each_line_for_list_block() {
+        let s = excerpt_error("first\nsecond\nthird");
+        assert_eq!(s, "    first\n    second\n    third");
+    }
+
+    #[test]
+    fn excerpt_error_truncates_runaway_stderr_at_char_boundary() {
+        // 1500 ASCII bytes of stderr — past the 800-byte cap.
+        let huge = "x".repeat(1500);
+        let s = excerpt_error(&huge);
+        // Truncated and ellipsis-suffixed so the chat surface doesn't
+        // explode if a plugin dumps multi-screen diagnostics.
+        assert!(s.ends_with('…'));
+        assert!(s.len() < 1500);
+    }
+
+    #[test]
+    fn excerpt_error_handles_multibyte_chars_at_truncation_boundary() {
+        // 4-byte UTF-8 characters padded past the 800-byte cap. The
+        // boundary scan must back up rather than panicking. Each "🚀"
+        // is 4 bytes, so 250 of them = 1000 bytes.
+        let s = excerpt_error(&"🚀".repeat(250));
+        assert!(s.ends_with('…'));
+        // Sanity: still valid UTF-8 (push to String would have panicked
+        // if the cut landed mid-char).
+        assert!(s.is_char_boundary(s.len()));
     }
 
     #[tokio::test]
