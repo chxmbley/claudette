@@ -145,23 +145,16 @@ export function ChatInputArea({
     const ta = textareaRef.current;
     const start = ta?.selectionStart ?? cursorPos;
     const end = ta?.selectionEnd ?? cursorPos;
-    setChatInput((currentInput) => {
-      const next = insertTranscriptAtSelection(
-        currentInput,
-        transcript,
-        start,
-        end,
-      );
-      setCursorPos(next.cursor);
-      requestAnimationFrame(() => {
-        const current = textareaRef.current;
-        if (!current) return;
-        current.focus();
-        current.selectionStart = current.selectionEnd = next.cursor;
-      });
-      return next.text;
+    const next = insertTranscriptAtSelection(chatInput, transcript, start, end);
+    setCursorPos(next.cursor);
+    requestAnimationFrame(() => {
+      const current = textareaRef.current;
+      if (!current) return;
+      current.focus();
+      current.selectionStart = current.selectionEnd = next.cursor;
     });
-  }, [cursorPos]);
+    setChatInput(next.text);
+  }, [cursorPos, chatInput, setChatInput]);
 
   const focusVoiceProvider = useAppStore((s) => s.focusVoiceProvider);
   const voice = useVoiceInput(
@@ -188,9 +181,9 @@ export function ChatInputArea({
   }, [voice.state, voice.cancel]);
 
   const handleInsertPinnedCommand = useCallback((commandText: string) => {
-    setChatInput((prev) => commandText + (prev ? " " + prev : ""));
+    setChatInput(commandText + (chatInput ? " " + chatInput : ""));
     textareaRef.current?.focus();
-  }, []);
+  }, [chatInput, setChatInput]);
 
   const draftsRef = useRef<Record<string, string>>({});
   const prevSessionRef = useRef(sessionId);
