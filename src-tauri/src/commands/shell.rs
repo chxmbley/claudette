@@ -36,13 +36,79 @@ pub fn detect_user_shell() -> (String, ShellType) {
 
 #[tauri::command]
 pub async fn open_in_editor(path: String) -> Result<(), String> {
-    // Open file in default editor using tauri-plugin-dialog
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = opener::open(&path) {
-            eprintln!("Failed to open file in editor: {e}");
+    // Expand a leading `~/` (or bare `~`) using the host's home dir.
+    // `opener::open` shells out to the OS handler, which doesn't perform
+    // shell-style tilde expansion — without this, the markdown autolinker
+    // emitting `~/Downloads/foo.csv` would silently fail to open.
+    let expanded = expand_home_tilde(&path);
+    if !is_acceptable_open_target(&expanded) {
+        return Err(format!(
+            "refusing to open non-file path {expanded:?} via open_in_editor — \
+             this command opens local files only; use open_url for HTTP(S)"
+        ));
+    }
+    // Run synchronously so errors propagate back to the frontend instead
+    // of getting silently dropped on stderr inside a spawned task. The
+    // helper is a thin wrapper around `open` / `xdg-open` / `cmd start`,
+    // all of which return as soon as the OS hands off — no blocking.
+    opener::open(&expanded).map_err(|e| format!("Failed to open {expanded:?}: {e}"))
+}
+
+/// Whether a string looks like a local file path we should hand to the OS
+/// opener. Reject URLs (`opener::open` happily opens `https://…` or even
+/// `javascript:` on some platforms) so a crafted markdown link with a
+/// `claudettepath:` href can't be smuggled into a generic URL trampoline.
+/// Also reject relative paths — the autolinker only emits absolute matches,
+/// and a relative input would resolve against an unpredictable cwd.
+fn is_acceptable_open_target(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // Any `<scheme>://…` shape is a URL, not a file. Use the same heuristic
+    // hast-util-sanitize uses: a colon before the first `/`, `?`, or `#`.
+    let colon = s.find(':');
+    let slash = s.find('/');
+    if let Some(c) = colon
+        && (slash.is_none() || c < slash.unwrap_or(usize::MAX))
+        && s[c..].starts_with("://")
+    {
+        return false;
+    }
+    // POSIX absolute (`/foo/bar`).
+    if s.starts_with('/') {
+        return true;
+    }
+    // Windows UNC (`\\server\share\…`) or back-slash absolute (`\foo`).
+    if s.starts_with('\\') {
+        return true;
+    }
+    // Windows drive (`C:\…` or `C:/…`).
+    let mut chars = s.chars();
+    if let (Some(first), Some(second), Some(third)) = (chars.next(), chars.next(), chars.next())
+        && first.is_ascii_alphabetic()
+        && second == ':'
+        && (third == '\\' || third == '/')
+    {
+        return true;
+    }
+    false
+}
+
+/// Expand a leading `~` or `~/` to the user's home directory. Returns the
+/// input unchanged if it doesn't start with `~`, or if the home dir can't
+/// be resolved (best-effort: callers still see a sensible error from the
+/// OS open command instead of a silent expansion failure).
+fn expand_home_tilde(path: &str) -> String {
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().into_owned();
         }
-    });
-    Ok(())
+    } else if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    path.to_string()
 }
 
 /// Returns true if the URL uses a scheme safe for opening in the system browser.
@@ -140,5 +206,87 @@ mod tests {
     #[test]
     fn is_safe_url_scheme_blocks_fragment() {
         assert!(!is_safe_url_scheme("#section"));
+    }
+
+    #[test]
+    fn expand_home_tilde_expands_tilde_slash() {
+        let Some(home) = dirs::home_dir() else {
+            // Test machines without a resolvable home dir return the
+            // input unchanged — verify that path explicitly so the
+            // test still says something meaningful.
+            assert_eq!(expand_home_tilde("~/foo"), "~/foo");
+            return;
+        };
+        let expected = home.join("foo").to_string_lossy().into_owned();
+        assert_eq!(expand_home_tilde("~/foo"), expected);
+    }
+
+    #[test]
+    fn expand_home_tilde_expands_bare_tilde() {
+        let Some(home) = dirs::home_dir() else {
+            assert_eq!(expand_home_tilde("~"), "~");
+            return;
+        };
+        assert_eq!(expand_home_tilde("~"), home.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn expand_home_tilde_leaves_absolute_paths_alone() {
+        assert_eq!(expand_home_tilde("/tmp/foo.csv"), "/tmp/foo.csv");
+        assert_eq!(
+            expand_home_tilde("C:\\Users\\foo.csv"),
+            "C:\\Users\\foo.csv"
+        );
+    }
+
+    #[test]
+    fn expand_home_tilde_does_not_expand_user_specific_tilde() {
+        // `~root/foo` is shell sugar for "root's home" — we don't try
+        // to handle that. The string passes through unchanged so the
+        // OS open command can decide.
+        assert_eq!(expand_home_tilde("~root/foo"), "~root/foo");
+    }
+
+    #[test]
+    fn is_acceptable_open_target_accepts_posix_absolute() {
+        assert!(is_acceptable_open_target("/tmp/foo.csv"));
+        assert!(is_acceptable_open_target("/etc"));
+    }
+
+    #[test]
+    fn is_acceptable_open_target_accepts_windows_drive() {
+        assert!(is_acceptable_open_target("C:\\Users\\foo.csv"));
+        assert!(is_acceptable_open_target("c:/Users/foo.csv"));
+    }
+
+    #[test]
+    fn is_acceptable_open_target_accepts_unc() {
+        assert!(is_acceptable_open_target("\\\\server\\share\\file.txt"));
+    }
+
+    #[test]
+    fn is_acceptable_open_target_rejects_urls() {
+        assert!(!is_acceptable_open_target("https://example.com"));
+        assert!(!is_acceptable_open_target("http://example.com/path"));
+        assert!(!is_acceptable_open_target("file:///etc/passwd"));
+        // Even a "claudettepath:" prefix gets stripped by the frontend
+        // before invocation, but if a crafted link slipped through with
+        // a URL payload after the scheme we still reject:
+        assert!(!is_acceptable_open_target("javascript://alert(1)"));
+    }
+
+    #[test]
+    fn is_acceptable_open_target_rejects_relative_and_empty() {
+        assert!(!is_acceptable_open_target(""));
+        assert!(!is_acceptable_open_target("foo/bar.csv"));
+        assert!(!is_acceptable_open_target("./foo.csv"));
+        assert!(!is_acceptable_open_target("../foo.csv"));
+    }
+
+    #[test]
+    fn is_acceptable_open_target_rejects_drive_without_separator() {
+        // `C:foo` is a Windows-relative-to-current-dir-on-drive path —
+        // unpredictable; reject.
+        assert!(!is_acceptable_open_target("C:foo.csv"));
     }
 }
