@@ -27,10 +27,9 @@ impl AgentBackendKind {
     }
 
     /// The harness chosen for this kind when the backend config does
-    /// not pin an explicit `runtime_harness`. The default is the
-    /// dispatch the user gets out of the box; alternatives are listed
-    /// by `available_harnesses` and surfaced as a Runtime select on
-    /// the Settings → Models card.
+    /// not pin an explicit `runtime_harness`. Every kind currently maps
+    /// to a single sanctioned harness (see `available_harnesses`); the
+    /// `runtime_harness` override is retained for forward compatibility.
     pub fn default_harness(self) -> AgentBackendRuntimeHarness {
         match self {
             // Anthropic-compatible backends and local model runtimes
