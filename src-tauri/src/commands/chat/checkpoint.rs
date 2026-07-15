@@ -57,8 +57,8 @@ pub async fn rollback_to_checkpoint(
     // (instead of stamping `session_id: String::new()`) — otherwise
     // `apply_migration_to_session` snapshots `prior_session_id` as
     // empty after an app restart, and the post-rollback cleanup
-    // (`end_agent_session` + `remove_pi_session_dir`) silently skips
-    // even though the DB knew about the prior runtime sid.
+    // (`end_agent_session`) silently skips even though the DB knew
+    // about the prior runtime sid.
     let persisted_prior_sid = chat_session.session_id.clone().unwrap_or_default();
     let persisted_prior_turn_count = chat_session.turn_count;
 
@@ -193,8 +193,6 @@ pub async fn rollback_to_checkpoint(
     };
     if !prior_sid_for_cleanup.is_empty() {
         let _ = db.end_agent_session(&prior_sid_for_cleanup, false);
-        #[cfg(feature = "pi-sdk")]
-        super::remove_pi_session_dir(&state.db_path, &prior_sid_for_cleanup).await;
     }
     db.save_chat_session_state(&chat_session_id, &snapshot.new_session_id, 0)
         .map_err(|e| e.to_string())?;

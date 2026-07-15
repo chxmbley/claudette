@@ -127,45 +127,6 @@ pub async fn get_claude_auth_status(
     Ok(status)
 }
 
-/// Lightweight, AppHandle-free probe used by the backend resolver to
-/// answer "is the local Claude CLI signed in with an OAuth subscription
-/// token right now?". Returns `false` on any error path (missing CLI,
-/// timeout, parse failure) so the gate fails open — the only caller
-/// uses it to block a sensitive route, not to grant one.
-//
-// `alternative-backends`-gated builds are the only consumer; suppress
-// the dead-code warning on stripped builds without forcing the function
-// itself behind a feature wall (it's small and stays useful for tests).
-#[cfg_attr(not(feature = "alternative-backends"), allow(dead_code))]
-pub async fn is_claude_oauth_authenticated() -> bool {
-    let claude_path = claudette::agent::resolve_claude_path().await;
-    let mut command = claudette::process::command(&claude_path);
-    command
-        .args(["auth", "status", "--json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("PATH", claudette::env::enriched_path());
-    sanitize_claude_subprocess_env(&mut command);
-
-    let Ok(Ok(output)) = timeout(AUTH_STATUS_TIMEOUT, command.output()).await else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Ok(status) = parse_auth_status(&stdout) else {
-        return false;
-    };
-    status.logged_in
-        && status
-            .auth_method
-            .as_deref()
-            .is_some_and(|method| method.eq_ignore_ascii_case("oauth_token"))
-}
-
 fn parse_auth_status(stdout: &str) -> Result<ClaudeAuthStatus, String> {
     let parsed: ClaudeAuthStatusJson = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("Failed to parse `claude auth status --json` output: {e}"))?;

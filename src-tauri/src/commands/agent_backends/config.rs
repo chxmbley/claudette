@@ -102,13 +102,6 @@ pub(super) fn apply_discovered_models(
     // Ollama / LM Studio / cloud OpenAI / Codex auto-detect the server's
     // own model list and the picker is supposed to mirror that source of
     // truth — leaving stale manual rows behind confuses the UI.
-    //
-    // Pi is intentionally excluded: the Pi Settings card surfaces a
-    // manual-models editor for custom-provider rows the user wires up
-    // outside `getAvailable()` (e.g. local Ollama via
-    // `~/.pi/agent/models.json`, internal proxies). Wiping those on
-    // every refresh would silently delete user-entered configuration
-    // and is the regression Codex flagged.
     let clears_manual = matches!(
         backend.kind,
         AgentBackendKind::Ollama
@@ -440,17 +433,6 @@ pub(super) fn normalize_backend(mut backend: AgentBackendConfig) -> AgentBackend
     if backend.context_window_default == 0 {
         backend.context_window_default = 64_000;
     }
-    #[cfg(feature = "pi-sdk")]
-    let model_discovery_kinds = matches!(
-        backend.kind,
-        AgentBackendKind::Ollama
-            | AgentBackendKind::OpenAiApi
-            | AgentBackendKind::CodexSubscription
-            | AgentBackendKind::CodexNative
-            | AgentBackendKind::PiSdk
-            | AgentBackendKind::LmStudio
-    );
-    #[cfg(not(feature = "pi-sdk"))]
     let model_discovery_kinds = matches!(
         backend.kind,
         AgentBackendKind::Ollama
@@ -497,10 +479,9 @@ pub(super) fn runtime_hash(
     config.id.hash(&mut hasher);
     config.label.hash(&mut hasher);
     backend_kind_hash_key(config.kind).hash(&mut hasher);
-    // The user-selected harness goes into the hash too — flipping
-    // Settings → Models → $(card) → Runtime between Pi and Claude CLI
-    // mid-session must force a respawn, otherwise the live agent keeps
-    // talking to the old subprocess.
+    // The user-selected harness goes into the hash too — flipping a
+    // card's runtime mid-session must force a respawn, otherwise the
+    // live agent keeps talking to the old subprocess.
     harness_hash_key(config.effective_harness()).hash(&mut hasher);
     config.base_url.hash(&mut hasher);
     config.enabled.hash(&mut hasher);
@@ -540,8 +521,6 @@ pub(super) fn backend_kind_hash_key(kind: AgentBackendKind) -> &'static str {
         AgentBackendKind::OpenAiApi => "openai_api",
         AgentBackendKind::CodexSubscription => "codex_subscription",
         AgentBackendKind::CodexNative => "codex_native",
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => "pi_sdk",
         AgentBackendKind::CustomAnthropic => "custom_anthropic",
         AgentBackendKind::CustomOpenAi => "custom_openai",
         AgentBackendKind::LmStudio => "lm_studio",
@@ -552,7 +531,5 @@ fn harness_hash_key(harness: AgentBackendRuntimeHarness) -> &'static str {
     match harness {
         AgentBackendRuntimeHarness::ClaudeCode => "claude_code",
         AgentBackendRuntimeHarness::CodexAppServer => "codex_app_server",
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendRuntimeHarness::PiSdk => "pi_sdk",
     }
 }

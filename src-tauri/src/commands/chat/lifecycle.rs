@@ -177,10 +177,8 @@ pub async fn reset_agent_session(
     // discards in-flight state, so record as a failure.
     db.clear_chat_session_state(&chat_session_id)
         .map_err(|e| e.to_string())?;
-    let pi_sid = ended_sid.or(persisted_sid);
-    if let Some(sid) = pi_sid.as_deref().filter(|s| !s.is_empty()) {
-        #[cfg(feature = "pi-sdk")]
-        super::remove_pi_session_dir(&state.db_path, sid).await;
+    let cleanup_sid = ended_sid.or(persisted_sid);
+    if let Some(sid) = cleanup_sid.as_deref().filter(|s| !s.is_empty()) {
         let _ = db.end_agent_session(sid, false);
     }
 
@@ -332,10 +330,9 @@ pub async fn prepare_cross_harness_migration(
     // `turn_count` from the persisted `chat_sessions` row so
     // `apply_migration_to_session`'s `prior_session_id` snapshot
     // captures the REAL prior runtime session id — otherwise the
-    // post-migration cleanup (`end_agent_session` + `remove_pi_session_dir`)
-    // skips silently, leaving orphan `agent_sessions` rows and stale Pi
-    // session directories under `data/pi-sessions/<sid>/` even though the
-    // DB knew about the prior id.
+    // post-migration cleanup (`end_agent_session`) skips silently,
+    // leaving orphan `agent_sessions` rows even though the DB knew
+    // about the prior id.
     let persisted_prior_sid = chat_session.session_id.clone().unwrap_or_default();
     let persisted_prior_turn_count = chat_session.turn_count;
 
@@ -399,12 +396,12 @@ pub async fn prepare_cross_harness_migration(
         .map_err(|e| e.to_string())?;
     // Retire the prior session id (if any) so the agent_sessions
     // table doesn't accumulate orphan rows pointing at the old
-    // transcript, and the Pi session dir for that id is cleaned up.
-    // Belt-and-suspenders fallback: if the in-memory snapshot's
-    // `prior_session_id` was empty (e.g. the `AgentSessionState`
-    // entry existed but had never been wired to a runtime sid), trust
-    // the persisted `chat_sessions.session_id` we captured before
-    // taking the lock so we still retire the row the DB knew about.
+    // transcript. Belt-and-suspenders fallback: if the in-memory
+    // snapshot's `prior_session_id` was empty (e.g. the
+    // `AgentSessionState` entry existed but had never been wired to a
+    // runtime sid), trust the persisted `chat_sessions.session_id` we
+    // captured before taking the lock so we still retire the row the
+    // DB knew about.
     let prior_sid_for_cleanup = if snapshot.prior_session_id.is_empty() {
         persisted_prior_sid
     } else {
@@ -412,8 +409,6 @@ pub async fn prepare_cross_harness_migration(
     };
     if !prior_sid_for_cleanup.is_empty() {
         let _ = db.end_agent_session(&prior_sid_for_cleanup, false);
-        #[cfg(feature = "pi-sdk")]
-        super::remove_pi_session_dir(&state.db_path, &prior_sid_for_cleanup).await;
     }
 
     crate::tray::rebuild_tray(&app);

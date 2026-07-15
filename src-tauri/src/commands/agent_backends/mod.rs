@@ -34,8 +34,6 @@ mod config;
 mod discovery;
 mod gateway;
 mod gateway_translate;
-#[cfg(feature = "pi-sdk")]
-pub mod pi_auth;
 mod runtime_dispatch;
 
 pub use gateway::BackendGateway;
@@ -105,53 +103,10 @@ pub async fn auto_detect_agent_backends(
         .iter()
         .find(|backend| backend.id == "lm-studio")
         .cloned();
-    #[cfg(feature = "pi-sdk")]
-    let pi = backends.iter().find(|backend| backend.id == "pi").cloned();
     let probe_codex = should_probe_backend_auto_detection(&db, NATIVE_CODEX_BACKEND_ID)?;
     let probe_ollama = should_probe_backend_auto_detection(&db, "ollama")?;
     let probe_lm_studio = should_probe_backend_auto_detection(&db, "lm-studio")?;
-    #[cfg(feature = "pi-sdk")]
-    let probe_pi = should_probe_backend_auto_detection(&db, "pi")?;
 
-    #[cfg(feature = "pi-sdk")]
-    let (codex_detection, ollama_detection, lm_studio_detection, pi_detection) = tokio::join!(
-        async move {
-            if probe_codex {
-                probe_codex_backend(codex).await
-            } else {
-                skipped_backend_auto_detection(NATIVE_CODEX_BACKEND_ID)
-            }
-        },
-        async move {
-            if probe_ollama {
-                probe_model_discovery_backend(ollama).await
-            } else {
-                skipped_backend_auto_detection("ollama")
-            }
-        },
-        async move {
-            if probe_lm_studio {
-                probe_model_discovery_backend(lm_studio).await
-            } else {
-                skipped_backend_auto_detection("lm-studio")
-            }
-        },
-        // Pi piggybacks on `probe_model_discovery_backend` because
-        // `discover_models` already dispatches to `discover_pi_models`
-        // for the `PiSdk` kind, which spawns the same Bun sidecar the
-        // Refresh button uses. Pi's discovery is heavier than a
-        // localhost probe (Bun cold-start), but it's the only way to
-        // populate the chat-header model picker on a fresh launch —
-        // without it the user only sees the two seed manual models.
-        async move {
-            if probe_pi {
-                probe_model_discovery_backend(pi).await
-            } else {
-                skipped_backend_auto_detection("pi")
-            }
-        },
-    );
-    #[cfg(not(feature = "pi-sdk"))]
     let (codex_detection, ollama_detection, lm_studio_detection) = tokio::join!(
         async move {
             if probe_codex {
@@ -175,13 +130,7 @@ pub async fn auto_detect_agent_backends(
             }
         },
     );
-    let mut detections = vec![
-        codex_detection,
-        ollama_detection,
-        lm_studio_detection,
-        #[cfg(feature = "pi-sdk")]
-        pi_detection,
-    ];
+    let mut detections = vec![codex_detection, ollama_detection, lm_studio_detection];
     if detections.iter().any(|detection| {
         canonical_backend_id(&detection.backend_id) == NATIVE_CODEX_BACKEND_ID && detection.detected
     }) && !backend_auto_detect_disabled(&db, NATIVE_CODEX_BACKEND_ID)?
@@ -289,7 +238,6 @@ pub async fn delete_agent_backend(
             | "codex-subscription"
             | "codex"
             | "experimental-codex"
-            | "pi"
             | "lm-studio"
     ) {
         return Err("Built-in backends can be disabled but not deleted".to_string());
@@ -609,11 +557,8 @@ mod tests {
     use claudette::agent_backend::{AgentBackendKind, AgentBackendModel};
     use serde_json::{Value, json};
 
-    #[cfg(feature = "pi-sdk")]
-    use super::auto_detect::PI_AUTO_DETECT_TIMEOUT;
     use super::auto_detect::{
-        AUTO_DETECT_TIMEOUT, BackendAutoDetection, auto_detect_disabled_key,
-        backend_auto_detect_timeout, codex_startup_models,
+        BackendAutoDetection, auto_detect_disabled_key, codex_startup_models,
     };
     use super::codex_gate::{FIRST_CLASS_BACKENDS_PROMOTION_KEY, LEGACY_NATIVE_CODEX_BACKEND_ID};
     use super::config::{
@@ -637,11 +582,6 @@ mod tests {
     };
     use super::runtime_dispatch::{
         append_custom_model_env, build_claude_code_direct_runtime, build_codex_app_server_runtime,
-        resolve_dispatch_harness,
-    };
-    #[cfg(feature = "pi-sdk")]
-    use super::runtime_dispatch::{
-        build_pi_sdk_runtime, pi_model_targets_anthropic, qualify_model_for_pi,
     };
     use super::*;
 
@@ -2459,121 +2399,11 @@ data: [DONE]
         assert_eq!(normalized.label, "Codex");
     }
 
-    // -- Pi runtime helpers -------------------------------------------------
-
-    #[cfg(feature = "pi-sdk")]
     #[test]
-    fn qualify_model_for_pi_prepends_provider_prefix_for_local_kinds() {
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::Ollama, "llama3"),
-            "ollama/llama3"
-        );
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::LmStudio, "qwen3"),
-            "lmstudio/qwen3"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn qualify_model_for_pi_prepends_openai_for_codex_native() {
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::CodexNative, "gpt-5.4"),
-            "openai/gpt-5.4"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn qualify_model_for_pi_leaves_already_qualified_ids_unchanged() {
-        // The Pi card's own ids are already provider/model — never
-        // double-prefix them.
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::PiSdk, "anthropic/claude-opus-4-5"),
-            "anthropic/claude-opus-4-5"
-        );
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::Ollama, "ollama/llama3"),
-            "ollama/llama3"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn qualify_model_for_pi_passes_through_when_kind_has_no_prefix() {
-        // Subscription-OAuth flavors return None — those models must
-        // never reach the Pi sidecar at all (the gate above stops them),
-        // but defensively the qualifier doesn't invent a provider.
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::Anthropic, "sonnet"),
-            "sonnet"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn qualify_model_for_pi_preserves_slash_in_ollama_model_ids() {
-        // Ollama model names legitimately contain slashes
-        // (`library/llama3`, `user/custom-model`). The old "any slash
-        // means already-qualified" heuristic dropped the `ollama/`
-        // prefix on these and Pi's registry never resolved them.
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::Ollama, "library/llama3"),
-            "ollama/library/llama3"
-        );
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::Ollama, "user/custom-model"),
-            "ollama/user/custom-model"
-        );
-        // The corresponding LM Studio case (e.g. a manual entry shaped
-        // like `studio/foo`) should also pick up the `lmstudio/` prefix.
-        assert_eq!(
-            qualify_model_for_pi(AgentBackendKind::LmStudio, "studio/foo"),
-            "lmstudio/studio/foo"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn apply_discovered_models_preserves_pi_manual_entries() {
-        // Pi's Settings card exposes a manual-models editor for custom
-        // entries the user wires up outside Pi's own `getAvailable()`
-        // (e.g. local Ollama via `~/.pi/agent/models.json`, internal
-        // proxies). The Codex peer review flagged that the previous
-        // implementation included `PiSdk` in the `manual_models.clear()`
-        // branch, so every refresh silently deleted user-entered rows.
-        // Pin the preservation contract here.
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.manual_models = vec![AgentBackendModel {
-            id: "ollama/custom-llama".to_string(),
-            label: "Custom Llama".to_string(),
-            context_window_tokens: 64_000,
-            discovered: false,
-        }];
-        let discovered = vec![AgentBackendModel {
-            id: "openai/gpt-5.4".to_string(),
-            label: "GPT-5.4".to_string(),
-            context_window_tokens: 272_000,
-            discovered: true,
-        }];
-        apply_discovered_models(&mut pi, discovered);
-        assert_eq!(
-            pi.manual_models.len(),
-            1,
-            "Pi refresh must keep user-entered manual models",
-        );
-        assert_eq!(pi.manual_models[0].id, "ollama/custom-llama");
-        // Discovered list is replaced, as expected.
-        assert_eq!(pi.discovered_models.len(), 1);
-        assert_eq!(pi.discovered_models[0].id, "openai/gpt-5.4");
-    }
-
-    #[test]
-    fn apply_discovered_models_still_clears_manual_for_ollama_card() {
-        // Sister case: non-Pi auto-detected backends (Ollama, LM Studio,
-        // cloud OpenAI, Codex) keep the historical behaviour where
-        // discovery replaces manual entries. Without this guard the Pi
-        // fix above could regress into "no backend ever clears manuals".
+    fn apply_discovered_models_clears_manual_for_ollama_card() {
+        // Auto-detected backends (Ollama, LM Studio, cloud OpenAI, Codex)
+        // replace manual entries on a successful discovery pass so the
+        // picker mirrors the server's live model list.
         let mut ollama = AgentBackendConfig::builtin_ollama();
         ollama.manual_models = vec![AgentBackendModel {
             id: "stale-manual".to_string(),
@@ -2590,447 +2420,10 @@ data: [DONE]
         apply_discovered_models(&mut ollama, discovered);
         assert!(
             ollama.manual_models.is_empty(),
-            "Ollama refresh continues to clear manuals — Pi is the exception"
+            "Ollama refresh replaces manual entries with the discovered list"
         );
     }
 
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn apply_discovered_models_default_model_honors_pi_manual_entries() {
-        // When the user's default_model points at a manual Pi row, the
-        // discovery pass must not overwrite that selection with a
-        // discovered model. Otherwise the default flips to whatever Pi
-        // happens to surface first the next time the Pi sidecar refreshes
-        // (which can change with auth status), silently re-routing the
-        // user's chats. Mirrors the discovered-models check that already
-        // protected non-Pi defaults.
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.manual_models = vec![AgentBackendModel {
-            id: "ollama/custom-llama".to_string(),
-            label: "Custom Llama".to_string(),
-            context_window_tokens: 64_000,
-            discovered: false,
-        }];
-        pi.default_model = Some("ollama/custom-llama".to_string());
-        let discovered = vec![AgentBackendModel {
-            id: "openai/gpt-5.4".to_string(),
-            label: "GPT-5.4".to_string(),
-            context_window_tokens: 272_000,
-            discovered: true,
-        }];
-        apply_discovered_models(&mut pi, discovered);
-        assert_eq!(
-            pi.default_model.as_deref(),
-            Some("ollama/custom-llama"),
-            "manual default must survive a refresh that doesn't include it"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_emits_ollama_provider_override_with_v1_base_url() {
-        // Ollama's API is OpenAI-compatible at `/v1`. Claudette's
-        // backend stores the bare host, so the override builder must
-        // append the `/v1` suffix so Pi's `registerProvider` lands on
-        // the OpenAI-style chat completions endpoint and the agent
-        // loop can actually reach the local server.
-        let mut ollama = AgentBackendConfig::builtin_ollama();
-        ollama.base_url = Some("http://localhost:11434".to_string());
-        ollama.discovered_models = vec![claudette::agent_backend::AgentBackendModel {
-            id: "llama3".to_string(),
-            label: "Llama 3".to_string(),
-            context_window_tokens: 128_000,
-            discovered: true,
-        }];
-        let runtime = build_pi_sdk_runtime(&mut ollama, Some("llama3"));
-        let override_ = runtime
-            .pi_provider_override
-            .expect("Ollama route should emit a provider override");
-        assert_eq!(override_.provider, "ollama");
-        assert_eq!(override_.base_url, "http://localhost:11434/v1");
-        assert_eq!(override_.model_id, "llama3");
-        assert_eq!(override_.model_label, "Llama 3");
-        assert_eq!(override_.context_window, 128_000);
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_provider_override_preserves_v1_already_in_base_url() {
-        // Idempotency: if the user's LM Studio card already points at
-        // `http://localhost:1234/v1`, we must not append a second
-        // `/v1`. The fix to `normalize_pi_provider_base_url` is the
-        // load-bearing piece here.
-        let mut lmstudio = AgentBackendConfig::builtin_lm_studio();
-        lmstudio.base_url = Some("http://localhost:1234/v1".to_string());
-        let runtime = build_pi_sdk_runtime(&mut lmstudio, Some("openai/gpt-4"));
-        let override_ = runtime
-            .pi_provider_override
-            .expect("LM Studio route should emit a provider override");
-        assert_eq!(override_.base_url, "http://localhost:1234/v1");
-        // Bare id falls through when the qualified prefix doesn't
-        // match LM Studio's `lmstudio` prefix.
-        assert_eq!(override_.model_id, "openai/gpt-4");
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_strips_provider_prefix_from_model_id_for_override() {
-        // The qualified model id reaching `build_pi_sdk_runtime` will
-        // already have the `ollama/` prefix applied by
-        // `qualify_model_for_pi`. The override carries Pi's
-        // `<provider>` + `<model_id>` split, so we must strip the
-        // prefix before storing — otherwise Pi looks up `library/...`
-        // inside the `ollama` provider and misses.
-        let mut ollama = AgentBackendConfig::builtin_ollama();
-        ollama.base_url = Some("http://localhost:11434".to_string());
-        let runtime = build_pi_sdk_runtime(&mut ollama, Some("ollama/library/llama3"));
-        let override_ = runtime
-            .pi_provider_override
-            .expect("Ollama route should emit a provider override");
-        assert_eq!(override_.model_id, "library/llama3");
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_skips_provider_override_for_cloud_kinds() {
-        // Pi already bundles providers for `openai`, `anthropic`,
-        // `codex_native`, etc. Registering a Claudette card under the
-        // same name with a different base URL would shadow Pi's
-        // bundled provider for the rest of the session — produce
-        // nothing instead and let the user's `~/.pi/agent/models.json`
-        // (or Pi's bundled config) drive the route.
-        let mut openai = AgentBackendConfig::builtin_openai_api();
-        openai.base_url = Some("https://api.openai.com".to_string());
-        let runtime = build_pi_sdk_runtime(&mut openai, Some("gpt-5.4"));
-        assert!(
-            runtime.pi_provider_override.is_none(),
-            "OpenAI API kind must not emit an override that would shadow Pi's bundled provider"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_skips_provider_override_when_base_url_is_empty() {
-        // No reachable server → no override. The session will hit
-        // `findModel`'s "not found" error which is the right UX —
-        // synthesizing an override with a blank base URL would mask
-        // the actual misconfiguration.
-        let mut ollama = AgentBackendConfig::builtin_ollama();
-        ollama.base_url = Some("   ".to_string());
-        let runtime = build_pi_sdk_runtime(&mut ollama, Some("llama3"));
-        assert!(runtime.pi_provider_override.is_none());
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_surfaces_qualified_model_for_ollama_bare_id() {
-        // The Pi sidecar's `findModel` splits on the first slash and
-        // refuses a bare model id like `llama3` on an Ollama-routed
-        // turn. The runtime needs to hand the qualified value back to
-        // the spawn site so the AgentSettings.model the harness sees is
-        // already `ollama/llama3`.
-        let mut ollama = AgentBackendConfig::builtin_ollama();
-        let runtime = build_pi_sdk_runtime(&mut ollama, Some("llama3"));
-        assert_eq!(runtime.model.as_deref(), Some("ollama/llama3"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_qualifies_ollama_id_with_internal_slash() {
-        // Regression: Ollama model ids legitimately contain slashes
-        // (`library/llama3`). Without this rewrite the sidecar's
-        // `findModel` parses `library` as the provider hint and the
-        // lookup always misses. The runtime must hand the spawn site
-        // a fully-prefixed `ollama/library/llama3`.
-        let mut ollama = AgentBackendConfig::builtin_ollama();
-        let runtime = build_pi_sdk_runtime(&mut ollama, Some("library/llama3"));
-        assert_eq!(runtime.model.as_deref(), Some("ollama/library/llama3"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_runtime_leaves_already_qualified_pi_card_model_unchanged() {
-        // The Pi card's own ids are already `<provider>/<modelId>`.
-        // Re-qualifying would double-prefix.
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        let runtime = build_pi_sdk_runtime(&mut pi, Some("anthropic/claude-opus-4-5"));
-        assert_eq!(
-            runtime.model.as_deref(),
-            Some("anthropic/claude-opus-4-5"),
-            "Pi card ids are already canonical and must not gain a `pi/` prefix"
-        );
-    }
-
-    #[test]
-    fn claude_code_runtime_does_not_rewrite_model() {
-        // Claude CLI consumes the caller's input as-is. Surfacing a
-        // model rewrite here would let the Pi qualification logic
-        // accidentally leak into the Claude-side spawn (which would
-        // then complain about an unknown `<provider>/<modelId>` id).
-        let ollama = AgentBackendConfig {
-            enabled: true,
-            ..AgentBackendConfig::builtin_ollama()
-        };
-        let runtime = build_claude_code_direct_runtime(&ollama, Some("llama3"), None);
-        assert_eq!(
-            runtime.model, None,
-            "Claude CLI paths leave the model field unset so the caller falls back to its input"
-        );
-    }
-
-    #[test]
-    fn codex_app_server_runtime_does_not_rewrite_model() {
-        // Codex app-server gets bare ids straight through (`gpt-5.4`,
-        // `o3`, …). Sibling guard to the Claude CLI test so a future
-        // refactor doesn't accidentally start qualifying Codex ids.
-        let codex = AgentBackendConfig::builtin_codex_native();
-        let runtime = build_codex_app_server_runtime(&codex, Some("gpt-5.4"));
-        assert_eq!(runtime.model, None);
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn resolve_dispatch_harness_downgrades_pi_to_claude_when_pi_backend_is_disabled() {
-        let ollama = AgentBackendConfig {
-            enabled: true,
-            ..AgentBackendConfig::builtin_ollama()
-        };
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.enabled = false;
-        let backends = vec![ollama.clone(), pi];
-        // Ollama defaults to PiSdk harness, but with Pi disabled it
-        // must fall back to ClaudeCode so the user's chat still works.
-        assert_eq!(
-            resolve_dispatch_harness(&ollama, &backends),
-            AgentBackendRuntimeHarness::ClaudeCode,
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn resolve_dispatch_harness_keeps_pi_when_pi_backend_is_enabled() {
-        let ollama = AgentBackendConfig {
-            enabled: true,
-            ..AgentBackendConfig::builtin_ollama()
-        };
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.enabled = true;
-        let backends = vec![ollama.clone(), pi];
-        assert_eq!(
-            resolve_dispatch_harness(&ollama, &backends),
-            AgentBackendRuntimeHarness::PiSdk,
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_gets_a_longer_auto_detect_timeout_than_http_probes() {
-        // Pi cold-starts a Bun sidecar plus boots the Pi SDK, which can
-        // easily exceed the 900ms budget the HTTP probes use. Pin the
-        // per-kind split so a future tidy pass doesn't accidentally
-        // re-flatten Pi back into the short budget — which is the bug
-        // that left the Pi card with an empty discovered_models at
-        // startup before this fix.
-        let ollama = AgentBackendConfig::builtin_ollama();
-        let lm_studio = AgentBackendConfig::builtin_lm_studio();
-        let pi = AgentBackendConfig::builtin_pi_sdk();
-        assert_eq!(backend_auto_detect_timeout(&ollama), AUTO_DETECT_TIMEOUT);
-        assert_eq!(backend_auto_detect_timeout(&lm_studio), AUTO_DETECT_TIMEOUT);
-        assert_eq!(backend_auto_detect_timeout(&pi), PI_AUTO_DETECT_TIMEOUT);
-        assert!(
-            PI_AUTO_DETECT_TIMEOUT > AUTO_DETECT_TIMEOUT,
-            "Pi timeout must exceed the HTTP-probe default"
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn disabling_pi_backend_persists_auto_detect_opt_out() {
-        // Pi is included in startup auto-detect now, so the disabled-flag
-        // has to stick across launches. Without an opt-out row, the next
-        // `auto_detect_agent_backends` pass would silently re-enable the
-        // card the user just turned off.
-        let db = Database::open_in_memory().expect("test db should open");
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.enabled = false;
-        persist_backend_auto_detect_opt_out(&db, &pi).expect("opt-out should persist");
-        assert!(
-            backend_auto_detect_disabled(&db, "pi").expect("opt-out flag should load"),
-            "Pi disable must write the auto-detect opt-out so it survives a restart",
-        );
-        // Re-enable: the opt-out row should be cleared so the probe resumes.
-        pi.enabled = true;
-        persist_backend_auto_detect_opt_out(&db, &pi).expect("opt-in should clear opt-out");
-        assert!(
-            !backend_auto_detect_disabled(&db, "pi").expect("opt-out flag should reload"),
-            "Pi re-enable must clear the opt-out row",
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn resolve_dispatch_harness_uses_kind_default_when_downgrading_codex_native() {
-        // Codex Native's `available_harnesses` is `[CodexAppServer, PiSdk]`
-        // — it never sanctions ClaudeCode. So if a user wires Codex Native
-        // to Pi and then disables Pi, the downgrade must drop to the
-        // kind's own default (CodexAppServer), not the generic Claude CLI
-        // path that would otherwise leak an Ollama-style base URL into a
-        // Codex turn.
-        let mut codex = AgentBackendConfig::builtin_codex_native();
-        codex.enabled = true;
-        codex.runtime_harness = Some(AgentBackendRuntimeHarness::PiSdk);
-        let mut pi = AgentBackendConfig::builtin_pi_sdk();
-        pi.enabled = false;
-        let backends = vec![codex.clone(), pi];
-        assert_eq!(
-            resolve_dispatch_harness(&codex, &backends),
-            AgentBackendRuntimeHarness::CodexAppServer,
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn resolve_dispatch_harness_does_not_downgrade_pi_card_itself() {
-        // The Pi card's own `effective_harness()` is `PiSdk`. The
-        // resolver-time enabled-flag check earlier in
-        // `resolve_backend_runtime` rejects a disabled Pi card before
-        // we get here, so `resolve_dispatch_harness` must not silently
-        // rewrite the Pi card to ClaudeCode (Pi-card-via-Claude-CLI is
-        // nonsense — there's no Anthropic-shaped endpoint to point at).
-        let pi = AgentBackendConfig::builtin_pi_sdk();
-        let backends = vec![pi.clone()];
-        assert_eq!(
-            resolve_dispatch_harness(&pi, &backends),
-            AgentBackendRuntimeHarness::PiSdk,
-        );
-    }
-
-    #[test]
-    fn runtime_hash_changes_when_runtime_harness_changes() {
-        // Flipping Settings → Models → $(card) → Runtime mid-session
-        // must respawn the agent; if `runtime_hash` ignored the
-        // override the live agent would keep talking to the previous
-        // harness's subprocess until the user manually reset.
-        let mut backend = AgentBackendConfig::builtin_ollama();
-        backend.enabled = true;
-        let default_hash = runtime_hash(&backend, None, Some("llama3"));
-        backend.runtime_harness = Some(AgentBackendRuntimeHarness::ClaudeCode);
-        let override_hash = runtime_hash(&backend, None, Some("llama3"));
-        assert_ne!(
-            default_hash, override_hash,
-            "runtime_hash must change when runtime_harness flips",
-        );
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_model_targets_anthropic_detects_anthropic_prefix() {
-        assert!(pi_model_targets_anthropic("anthropic/claude-opus-4-5"));
-        assert!(pi_model_targets_anthropic("Anthropic/Claude-Sonnet"));
-        assert!(pi_model_targets_anthropic("claude/sonnet"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_model_targets_anthropic_ignores_other_providers() {
-        assert!(!pi_model_targets_anthropic("openai/gpt-5.4"));
-        assert!(!pi_model_targets_anthropic("ollama/llama3"));
-        assert!(!pi_model_targets_anthropic(""));
-        assert!(!pi_model_targets_anthropic("mistral-7b"));
-        // Near-miss prefix: similar shape, different model.
-        assert!(!pi_model_targets_anthropic("clade-x"));
-        // `opusclasic-3b` is not the Anthropic `opus` alias — the gate
-        // only trips when `opus` is the whole id or a `opus-` / `opus_`
-        // prefixed family member, so unrelated names that happen to
-        // start with the four letters stay routable.
-        assert!(!pi_model_targets_anthropic("opusclassic"));
-        assert!(!pi_model_targets_anthropic("sonnets-of-shakespeare"));
-        assert!(!pi_model_targets_anthropic("haikulm"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_model_targets_anthropic_blocks_bare_claude_ids() {
-        // Codex peer-review regression: Pi's `findModel` falls back to
-        // scanning the entire registry when given a bare id, so a
-        // non-UI caller (slash command, IPC) sending Pi + `claude-opus-4-5`
-        // would still land on the Anthropic provider — bypassing the
-        // OAuth gate. Catch the bare-id case via Anthropic's naming
-        // convention so the gate trips on real model ids users would
-        // actually paste.
-        assert!(pi_model_targets_anthropic("claude"));
-        assert!(pi_model_targets_anthropic("claude-opus-4-5"));
-        assert!(pi_model_targets_anthropic("Claude-Sonnet-4-6"));
-        assert!(pi_model_targets_anthropic("claude_haiku"));
-        assert!(pi_model_targets_anthropic("claude-instant-1"));
-        // Surrounding whitespace must still trip the check — the
-        // upstream caller path doesn't always trim.
-        assert!(pi_model_targets_anthropic("  claude-opus-4-5  "));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_model_targets_anthropic_blocks_claude_code_bare_aliases() {
-        // Claude Code accepts `opus` / `sonnet` / `haiku` as canonical
-        // bare aliases for the latest Anthropic models in that family.
-        // The picker emits them, `/model` accepts them, and the
-        // `default_model` app-setting can hold them — so a user with
-        // an OAuth subscription who also has a custom `~/.pi/agent/models.json`
-        // that maps these names to an Anthropic row would otherwise
-        // route their subscription token through Pi. Block the aliases
-        // (case-insensitive, with optional surrounding whitespace)
-        // and any `opus-…` / `sonnet-…` / `haiku-…` family member that
-        // looks like an Anthropic model id.
-        for alias in [
-            "opus",
-            "sonnet",
-            "haiku",
-            "OPUS",
-            "Sonnet",
-            "  haiku  ",
-            "opus-4-7",
-            "sonnet-4-6",
-            "haiku-4-5",
-            "opus_legacy",
-        ] {
-            assert!(
-                pi_model_targets_anthropic(alias),
-                "{alias:?} should trip the gate"
-            );
-        }
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn build_pi_sdk_runtime_qualifies_model_for_non_pi_kind() {
-        let mut backend = AgentBackendConfig::builtin_ollama();
-        let runtime = build_pi_sdk_runtime(&mut backend, Some("llama3"));
-        assert_eq!(runtime.harness, AgentBackendRuntimeHarness::PiSdk);
-        assert!(
-            runtime.env.is_empty(),
-            "Pi runs with empty env so subscription credentials never leak in"
-        );
-        assert_eq!(backend.default_model.as_deref(), Some("ollama/llama3"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn build_pi_sdk_runtime_keeps_pi_card_ids_unchanged() {
-        let mut backend = AgentBackendConfig::builtin_pi_sdk();
-        let runtime = build_pi_sdk_runtime(&mut backend, Some("openai/gpt-5.4"));
-        assert_eq!(runtime.harness, AgentBackendRuntimeHarness::PiSdk);
-        assert_eq!(backend.default_model.as_deref(), Some("openai/gpt-5.4"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn build_pi_sdk_runtime_leaves_default_model_alone_when_no_model_passed() {
-        let mut backend = AgentBackendConfig::builtin_ollama();
-        backend.default_model = Some("preexisting".to_string());
-        let runtime = build_pi_sdk_runtime(&mut backend, None);
-        assert_eq!(runtime.harness, AgentBackendRuntimeHarness::PiSdk);
-        assert_eq!(backend.default_model.as_deref(), Some("preexisting"));
-    }
 
     #[test]
     fn build_codex_app_server_runtime_uses_empty_env() {

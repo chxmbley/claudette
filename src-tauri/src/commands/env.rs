@@ -1811,10 +1811,8 @@ pub fn spawn_repo_env_warmup(app: AppHandle, repo_id: String) {
 pub struct HostEnvFlags {
     pub disable_1m_context: bool,
     pub alternative_backends_compiled: bool,
-    /// Reports whether the Pi harness was compiled into this binary.
-    /// The frontend hides Pi cards / runtime options when this is
-    /// `false`, even if `alternative_backends_compiled` is `true` (a
-    /// build can ship Codex Native alt-backend support without Pi).
+    /// Retired: the Pi harness has been removed. Always `false`; kept on
+    /// the wire as a compatibility placeholder for older frontends.
     pub pi_sdk_compiled: bool,
 }
 
@@ -1826,7 +1824,7 @@ pub fn get_host_env_flags() -> HostEnvFlags {
     HostEnvFlags {
         disable_1m_context: std::env::var("CLAUDE_CODE_DISABLE_1M_CONTEXT").is_ok(),
         alternative_backends_compiled: cfg!(feature = "alternative-backends"),
-        pi_sdk_compiled: cfg!(feature = "pi-sdk"),
+        pi_sdk_compiled: false,
     }
 }
 

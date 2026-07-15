@@ -14,28 +14,24 @@
       "available": ["claude_code"]
     },
     "ollama": {
-      "default": "pi_sdk",
-      "available": ["pi_sdk", "claude_code"]
+      "default": "claude_code",
+      "available": ["claude_code"]
     },
     "lm_studio": {
-      "default": "pi_sdk",
-      "available": ["pi_sdk", "claude_code"]
+      "default": "claude_code",
+      "available": ["claude_code"]
     },
     "openai_api": {
       "default": "claude_code",
-      "available": ["claude_code", "pi_sdk"]
+      "available": ["claude_code"]
     },
     "custom_openai": {
       "default": "claude_code",
-      "available": ["claude_code", "pi_sdk"]
+      "available": ["claude_code"]
     },
     "codex_native": {
       "default": "codex_app_server",
-      "available": ["codex_app_server", "pi_sdk"]
-    },
-    "pi_sdk": {
-      "default": "pi_sdk",
-      "available": ["pi_sdk"]
+      "available": ["codex_app_server"]
     }
   }
 }

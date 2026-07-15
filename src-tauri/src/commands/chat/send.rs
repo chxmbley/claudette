@@ -11,8 +11,6 @@ use claudette::agent::{
     InnerStreamEvent, PersistentSessionStart, StartContentBlock, StreamEvent,
     is_codex_approval_tool_name, normalize_codex_reasoning_effort,
 };
-#[cfg(feature = "pi-sdk")]
-use claudette::agent::{PiSdkOptions, PiSdkSession};
 use claudette::agent_backend::AgentBackendRuntimeHarness;
 use claudette::base64_decode;
 use claudette::chat::{
@@ -888,45 +886,12 @@ fn persist_user_send(db: &Database, prepared: &PreparedUserSend) -> Result<(), S
     Ok(())
 }
 
-/// Stable user-facing string for the Pi-no-attachments case. Lives in
-/// one place so the send and steer gates produce identical errors.
-#[cfg(feature = "pi-sdk")]
-pub(super) fn pi_attachment_unsupported_message() -> &'static str {
-    "The Pi SDK harness does not yet support file attachments. \
-     Remove the attachments or switch this backend's runtime to Claude CLI \
-     in Settings → Models → Runtime."
-}
-
-/// Surface harness/attachment incompatibility *before* a turn is
-/// persisted. The Pi sidecar's `send_turn` / `steer_turn` reject
-/// non-empty attachment slices because Pi has no file-upload API
-/// yet (see `src/agent/pi_sdk.rs`); checking here keeps a rejected
-/// send from leaving an orphan user-message + attachment row in the
-/// chat history with no agent response. Without `pi-sdk` compiled in,
-/// the gate is a no-op — there's no Pi harness to dispatch to, so the
-/// only paths that survive accept attachments.
-pub(super) fn ensure_harness_accepts_attachments(
-    harness: AgentBackendRuntimeHarness,
-    attachments: &[FileAttachment],
-) -> Result<(), String> {
-    if attachments.is_empty() {
-        return Ok(());
-    }
-    #[cfg(feature = "pi-sdk")]
-    if harness == AgentBackendRuntimeHarness::PiSdk {
-        return Err(pi_attachment_unsupported_message().to_string());
-    }
-    #[cfg(not(feature = "pi-sdk"))]
-    let _ = harness;
-    Ok(())
-}
-
 /// True when this turn should be intercepted as a native compaction
-/// instead of a normal user turn. The Codex app-server and Pi SDK
-/// harnesses both need the intercept — each exposes a `start_compact()`
-/// that swaps in for `send_turn`. Claude Code is excluded: its CLI
-/// handles the literal `/compact` user input natively, so routing it
-/// through `start_compact()` would be wrong.
+/// instead of a normal user turn. The Codex app-server harness needs
+/// the intercept — it exposes a `start_compact()` that swaps in for
+/// `send_turn`. Claude Code is excluded: its CLI handles the literal
+/// `/compact` user input natively, so routing it through
+/// `start_compact()` would be wrong.
 ///
 /// Routing /compact through `send_chat_message` (and only swapping
 /// `send_turn` for `start_compact` at the very last step) lets us reuse
@@ -936,12 +901,7 @@ pub(super) fn is_native_compact_intent(harness: AgentBackendRuntimeHarness, prom
     if prompt.trim() != "/compact" {
         return false;
     }
-    match harness {
-        AgentBackendRuntimeHarness::CodexAppServer => true,
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendRuntimeHarness::PiSdk => true,
-        _ => false,
-    }
+    matches!(harness, AgentBackendRuntimeHarness::CodexAppServer)
 }
 
 fn cleanup_failed_steer_persistence(
@@ -1023,19 +983,6 @@ pub async fn steer_queued_chat_message(
         &content,
         attachments.as_deref(),
     )?;
-
-    // Steer goes straight to the live persistent session, so the harness
-    // is whatever spawned this session — read it directly off `ps`
-    // rather than re-resolving from settings. Pi rejects attachments;
-    // gating here keeps a rejected steer from leaving an orphan user
-    // message + pre-steer checkpoint behind. With `pi-sdk` compiled
-    // out, no live session can be Pi, so the check elides.
-    #[cfg(feature = "pi-sdk")]
-    if !prepared_user_send.cli_atts.is_empty()
-        && ps.kind() == claudette::agent::AgentHarnessKind::PiSdk
-    {
-        return Err(pi_attachment_unsupported_message().to_string());
-    }
 
     let anchor_msg_id = db
         .last_chat_message_id_for_session(&chat_session_id)
@@ -1172,7 +1119,7 @@ pub async fn send_chat_message(
     // out without leaving an orphan user-message + attachment row in
     // the chat history. The resolved value is reused downstream — the
     // original resolution site has been removed to avoid double work.
-    let (resolved_backend_id, mut resolved_model) =
+    let (resolved_backend_id, resolved_model) =
         crate::commands::agent_backends::resolve_backend_request_defaults(
             &db,
             backend_id.as_deref(),
@@ -1184,17 +1131,6 @@ pub async fn send_chat_message(
         resolved_model.as_deref(),
     )
     .await?;
-    // The Pi harness needs `<provider>/<modelId>` ids and rewrites bare
-    // or slash-containing inputs on its way out. Adopt the rewritten id
-    // *here* so the spawn at the bottom of this function hands the
-    // sidecar the qualified value — without this the AgentSettings.model
-    // below still carries the user's original id and the sidecar's
-    // `findModel` lookup misses (e.g. Ollama `library/llama3` would be
-    // parsed as provider=`library`).
-    if let Some(rewritten) = backend_runtime.model.clone() {
-        resolved_model = Some(rewritten);
-    }
-    ensure_harness_accepts_attachments(backend_runtime.harness, &prepared_user_send.cli_atts)?;
     // Native `/compact` doesn't take attachments — `start_compact()`
     // ignores them. Reject up-front so attachments never get persisted as
     // orphan rows under the synthesized `/compact` user message (the body
@@ -1485,46 +1421,18 @@ pub async fn send_chat_message(
         nudge.as_deref(),
         Some(claude_mcp_rules.as_str()),
     );
-    // Pi runs without the Claudette MCP bridge, so we strip both the
-    // send_to_user nudge *and* the AskUserQuestion / ExitPlanMode
-    // rules. Pointing a qwen / llama / GPT model at MCP tools that
-    // aren't registered with its runtime confuses the model's tool
-    // self-model and is part of why "what LLM are you?" used to come
-    // back with "Claude Code agent" answers on Pi sessions.
-    let pi_custom_instructions = claudette::global_prompt::compose_system_prompt(
-        session.custom_instructions.as_deref(),
-        None,
-        None,
-    );
     session.turn_count += 1;
     session.needs_attention = false;
     session.attention_kind = None;
 
     // backend_runtime / resolved_model were resolved up front (before
-    // persist) so the attachment-compat gate could run pre-persist.
-    // Reuse them here instead of re-resolving.
+    // persist). Reuse them here instead of re-resolving.
     if backend_runtime.harness == AgentBackendRuntimeHarness::CodexAppServer
         && let Some(codex_effort) = normalize_codex_reasoning_effort(effort.as_deref())
     {
         backend_runtime
             .hash
             .push_str(&format!("|codex-reasoning-effort:{codex_effort}"));
-    }
-    // Pi's persistent sidecar receives `thinkingLevel` only at start.
-    // Include it in the runtime hash so changing Pi effort or toggling
-    // thinking while a session is alive forces a respawn; otherwise the
-    // existing sidecar silently keeps the old setting. Mirrors how the
-    // Codex effort is folded into the hash just above.
-    #[cfg(feature = "pi-sdk")]
-    if backend_runtime.harness == AgentBackendRuntimeHarness::PiSdk {
-        let pi_thinking_level: String = if thinking_enabled.unwrap_or(false) {
-            effort.clone().unwrap_or_default()
-        } else {
-            "off".to_string()
-        };
-        backend_runtime
-            .hash
-            .push_str(&format!("|pi-thinking-level:{pi_thinking_level}"));
     }
 
     // Resolve user-toggled `claude --help` flags from the cached defs.
@@ -1972,12 +1880,6 @@ pub async fn send_chat_message(
     // can't move `app` into it directly — clone here, re-clone per
     // invocation, then re-clone again for the spawned task.
     let app_for_persistent = app.clone();
-    #[cfg(feature = "pi-sdk")]
-    let pi_sessions_root = super::pi_sessions_root(&state.db_path);
-    #[cfg(feature = "pi-sdk")]
-    let pi_custom_instructions_for_persistent = pi_custom_instructions.clone();
-    #[cfg(not(feature = "pi-sdk"))]
-    let _ = &pi_custom_instructions;
     let start_persistent = move |worktree: String,
                                  sid: String,
                                  is_resume: bool,
@@ -1987,10 +1889,6 @@ pub async fn send_chat_message(
         let env = ws_env_for_persistent.clone();
         let resolved = resolved_env_for_persistent.clone();
         let app_handle_for_this_call = app_for_persistent.clone();
-        #[cfg(feature = "pi-sdk")]
-        let pi_sessions_root = pi_sessions_root.clone();
-        #[cfg(feature = "pi-sdk")]
-        let pi_instructions = pi_custom_instructions_for_persistent.clone();
         async move {
             // Note: do NOT route the error through `crate::missing_cli::handle_err`
             // here. The caller's resume-fallback arm needs to inspect the raw
@@ -2095,39 +1993,6 @@ pub async fn send_chat_message(
                         started,
                     )))
                 }
-                #[cfg(feature = "pi-sdk")]
-                AgentBackendRuntimeHarness::PiSdk => {
-                    // `pi_instructions` omits the `send_to_user` MCP nudge
-                    // that `instructions` carries — Pi has no MCP bridge, so
-                    // forwarding the nudge would point the model at a tool
-                    // that isn't registered in the sidecar.
-                    let _ = instructions;
-                    let started = PiSdkSession::start(
-                        std::path::Path::new(&worktree),
-                        &sid,
-                        PiSdkOptions {
-                            model: settings.model.clone(),
-                            thinking_level: if settings.thinking_enabled {
-                                settings.effort.clone()
-                            } else {
-                                Some("off".to_string())
-                            },
-                            session_dir: Some(pi_sessions_root.join(&sid)),
-                            allowed_tools: tools,
-                            custom_instructions: pi_instructions,
-                            workspace_env: Some(env),
-                            resolved_env: Some(resolved),
-                            pi_provider_override: settings
-                                .backend_runtime
-                                .pi_provider_override
-                                .clone(),
-                            pi_provider_env:
-                                crate::commands::agent_backends::pi_auth::pi_local_secret_env()?,
-                        },
-                    )
-                    .await?;
-                    Ok::<Arc<AgentSession>, String>(Arc::new(AgentSession::from_pi_sdk(started)))
-                }
             }
         }
     };
@@ -2204,8 +2069,6 @@ pub async fn send_chat_message(
                         Some(b)
                     }
                     AgentBackendRuntimeHarness::CodexAppServer => None,
-                    #[cfg(feature = "pi-sdk")]
-                    AgentBackendRuntimeHarness::PiSdk => None,
                 };
                 if let Some(bridge) = bridge.as_ref()
                     && matches!(
@@ -2393,8 +2256,6 @@ pub async fn send_chat_message(
                 Some(b)
             }
             AgentBackendRuntimeHarness::CodexAppServer => None,
-            #[cfg(feature = "pi-sdk")]
-            AgentBackendRuntimeHarness::PiSdk => None,
         };
         if let Some(bridge) = bridge.as_ref()
             && matches!(
@@ -3424,8 +3285,7 @@ pub async fn send_chat_message(
 mod tests {
     use super::{
         ControlRequestSessionRoute, auth_failure_message_from_assistant_text,
-        auth_failure_message_from_stderr, ensure_harness_accepts_attachments,
-        env_provider_drifted_parts, has_env_trust_warning, pi_attachment_unsupported_message,
+        auth_failure_message_from_stderr, env_provider_drifted_parts, has_env_trust_warning,
         queue_control_prompt, remote_control_requested_or_active,
         remote_control_requested_or_active_for_turn,
         remote_control_should_defer_drift_teardown_for_turn,
@@ -3436,7 +3296,6 @@ mod tests {
     use crate::state::{
         AgentSessionState, AttentionKind, ClaudeRemoteControlLifecycle, ClaudeRemoteControlStatus,
     };
-    use claudette::agent::FileAttachment;
     use claudette::agent_backend::AgentBackendRuntimeHarness;
     use claudette::model::{ChatMessage, ChatRole};
 
@@ -3999,64 +3858,6 @@ mod tests {
         assert!(remote_control_should_defer_drift_teardown_for_turn(&status));
     }
 
-    fn dummy_attachment() -> FileAttachment {
-        FileAttachment {
-            media_type: "image/png".to_string(),
-            data_base64: "iVBORw0KGgo=".to_string(),
-            text_content: None,
-            filename: Some("x.png".to_string()),
-        }
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_harness_rejects_attachment_before_persist() {
-        // Pi's `send_turn` / `steer_turn` reject non-empty attachment
-        // slices today. Pinning this guard at the helper level keeps the
-        // chat-side gate from regressing — without it, a Pi turn fails
-        // *after* `persist_user_send` and leaves a dead user message +
-        // attachment row in the chat history.
-        let atts = vec![dummy_attachment()];
-        let err = ensure_harness_accepts_attachments(AgentBackendRuntimeHarness::PiSdk, &atts)
-            .expect_err("Pi + attachments must error pre-persist");
-        assert_eq!(err, pi_attachment_unsupported_message());
-        // The message has to be actionable — point the user at the
-        // Settings override they can use to recover without losing the
-        // composer state.
-        assert!(err.contains("Claude CLI"));
-        assert!(err.contains("Settings → Models → Runtime"));
-    }
-
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn pi_harness_accepts_turn_without_attachments() {
-        // Empty attachment slice is the common path; the guard must
-        // not surface a spurious error for plain Pi turns.
-        assert!(ensure_harness_accepts_attachments(AgentBackendRuntimeHarness::PiSdk, &[]).is_ok());
-    }
-
-    #[test]
-    fn claude_code_harness_accepts_attachments() {
-        // Sister-case to the Pi guard — Claude CLI fully supports image
-        // attachments and the gate must stay out of the way.
-        let atts = vec![dummy_attachment()];
-        assert!(
-            ensure_harness_accepts_attachments(AgentBackendRuntimeHarness::ClaudeCode, &atts)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn codex_app_server_harness_accepts_attachments() {
-        // Codex app-server has its own attachment plumbing; the
-        // attachment guard only flags Pi.
-        let atts = vec![dummy_attachment()];
-        assert!(
-            ensure_harness_accepts_attachments(AgentBackendRuntimeHarness::CodexAppServer, &atts)
-                .is_ok()
-        );
-    }
-
     #[test]
     fn native_compact_intent_detects_literal_slash_compact() {
         // The send pipeline checks this exactly: a native-compaction
@@ -4079,21 +3880,6 @@ mod tests {
         assert!(!super::is_native_compact_intent(
             AgentBackendRuntimeHarness::CodexAppServer,
             "tell me about compaction",
-        ));
-    }
-
-    /// Pi exposes a native `start_compact()` too, so `/compact` against
-    /// the Pi SDK harness must be intercepted exactly like Codex.
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn native_compact_intent_detects_pi_harness() {
-        assert!(super::is_native_compact_intent(
-            AgentBackendRuntimeHarness::PiSdk,
-            "/compact",
-        ));
-        assert!(!super::is_native_compact_intent(
-            AgentBackendRuntimeHarness::PiSdk,
-            "/compact focus on the bug",
         ));
     }
 

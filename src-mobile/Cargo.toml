@@ -18,11 +18,9 @@ name = "claudette-mobile"
 path = "src/main.rs"
 
 [dependencies]
-# `default-features = false` keeps the Pi harness, agent runtime, and other
-# desktop-only heavy bits out of the mobile binary. The mobile app only
-# needs the `transport` and `model` surfaces of the claudette lib — the
-# rest is the desktop's job.
-claudette = { path = "..", default-features = false }
+# The mobile app only needs the `transport` and `model` surfaces of the
+# claudette lib — the rest is the desktop's job.
+claudette = { path = ".." }
 tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

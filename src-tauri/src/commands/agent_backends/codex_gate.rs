@@ -17,21 +17,9 @@ pub(super) const FIRST_CLASS_BACKENDS_PROMOTION_KEY: &str = "agent_backends_firs
 
 /// Kinds that bypass the `alternative_backends_enabled` gate because
 /// they're first-class first-run experiences when their dependencies
-/// are detected (Codex via `codex` CLI, Pi via the bundled sidecar).
-/// Pi only counts when the Pi harness is compiled in — otherwise the
-/// list collapses to just Codex Native.
+/// are detected (Codex via the `codex` CLI).
 pub(super) fn is_always_on_alt_backend(kind: AgentBackendKind) -> bool {
-    #[cfg(feature = "pi-sdk")]
-    {
-        matches!(
-            kind,
-            AgentBackendKind::CodexNative | AgentBackendKind::PiSdk
-        )
-    }
-    #[cfg(not(feature = "pi-sdk"))]
-    {
-        matches!(kind, AgentBackendKind::CodexNative)
-    }
+    matches!(kind, AgentBackendKind::CodexNative)
 }
 
 pub(super) fn is_codex_gate_backend_id(id: &str) -> bool {
@@ -54,8 +42,6 @@ pub(super) fn default_backends_for_gate(native_codex_enabled: bool) -> Vec<Agent
         AgentBackendConfig::builtin_anthropic(),
         AgentBackendConfig::builtin_ollama(),
         AgentBackendConfig::builtin_openai_api(),
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendConfig::builtin_pi_sdk(),
         AgentBackendConfig::builtin_lm_studio(),
     ];
     if native_codex_enabled {

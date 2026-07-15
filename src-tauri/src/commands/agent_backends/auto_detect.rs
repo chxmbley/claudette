@@ -1,8 +1,8 @@
 //! Startup auto-detect probation + opt-out: the helpers that decide
 //! which built-in backends should flip themselves on at launch when
-//! their dependencies appear (Codex CLI, Ollama, LM Studio, Pi
-//! sidecar), and the per-backend opt-out persistence that keeps a
-//! deliberately-disabled card disabled.
+//! their dependencies appear (Codex CLI, Ollama, LM Studio), and the
+//! per-backend opt-out persistence that keeps a deliberately-disabled
+//! card disabled.
 
 use std::time::Duration;
 
@@ -15,16 +15,6 @@ use super::discovery::{codex_cli_command, discover_codex_models, discover_models
 
 pub(super) const AUTO_DETECT_DISABLED_PREFIX: &str = "agent_backend_auto_detect_disabled:";
 pub(super) const AUTO_DETECT_TIMEOUT: Duration = Duration::from_millis(900);
-// Pi's discovery cold-starts a Bun-compiled sidecar binary, boots the
-// Pi SDK, and enumerates 300+ models — easily 2–5s on first launch,
-// well past the 900ms budget we use for cheap localhost HTTP probes.
-// A short timeout here silently swallowed the discovery result and
-// left the Pi card with an empty `discovered_models` list at startup
-// (only the manual seeds were visible), forcing the user to open
-// Settings and click Refresh. 8s covers a cold Bun start with margin
-// and still bounds the worst case if the sidecar hangs.
-#[cfg(feature = "pi-sdk")]
-pub(super) const PI_AUTO_DETECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub(super) struct BackendAutoDetection {
@@ -42,23 +32,10 @@ pub(super) fn auto_detect_disabled_key(backend_id: &str) -> String {
 }
 
 pub(super) fn backend_supports_auto_detect(backend: &AgentBackendConfig) -> bool {
-    #[cfg(feature = "pi-sdk")]
-    {
-        matches!(
-            backend.kind,
-            AgentBackendKind::Ollama
-                | AgentBackendKind::CodexNative
-                | AgentBackendKind::LmStudio
-                | AgentBackendKind::PiSdk
-        )
-    }
-    #[cfg(not(feature = "pi-sdk"))]
-    {
-        matches!(
-            backend.kind,
-            AgentBackendKind::Ollama | AgentBackendKind::CodexNative | AgentBackendKind::LmStudio
-        )
-    }
+    matches!(
+        backend.kind,
+        AgentBackendKind::Ollama | AgentBackendKind::CodexNative | AgentBackendKind::LmStudio
+    )
 }
 
 pub(super) fn backend_auto_detect_disabled(
@@ -210,11 +187,10 @@ pub(super) async fn probe_model_discovery_backend(
         };
     };
     let backend_id = backend.id.clone();
-    // Pi cold-starts a sidecar; everything else hits a fast localhost
-    // endpoint. Pick the budget per kind rather than holding everyone
-    // to Pi's worst case (which would slow first-paint of the Settings
-    // panel and the chat picker for unrelated cards).
-    let timeout = backend_auto_detect_timeout(&backend);
+    // Every auto-detect probe hits a fast localhost endpoint, so a
+    // single tight budget keeps first-paint of the Settings panel and
+    // the chat picker snappy.
+    let timeout = AUTO_DETECT_TIMEOUT;
     match tokio::time::timeout(timeout, discover_models(&backend)).await {
         Ok(Ok(models)) => BackendAutoDetection {
             backend_id,
@@ -234,24 +210,12 @@ pub(super) async fn probe_model_discovery_backend(
             discovered_models: Vec::new(),
             // Surface the timeout as a warning so it's visible in the
             // settings panel's status strip instead of vanishing
-            // silently — that silent swallow was exactly what hid the
-            // Pi cold-start case before the per-kind timeout split.
+            // silently.
             warning: Some(format!(
                 "Auto-detect timed out for {} after {}s",
                 backend.label,
                 timeout.as_secs_f32().round() as u64
             )),
         },
-    }
-}
-
-/// Per-backend timeout for the startup auto-detect probe. Pi runs a
-/// Bun-compiled sidecar with a multi-second cold start; HTTP-probe
-/// backends get the tighter default so they don't drag out launch.
-pub(super) fn backend_auto_detect_timeout(backend: &AgentBackendConfig) -> Duration {
-    match backend.kind {
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => PI_AUTO_DETECT_TIMEOUT,
-        _ => AUTO_DETECT_TIMEOUT,
     }
 }

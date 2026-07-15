@@ -296,20 +296,17 @@ fn unsupported_remote_control_session_error(ps: &AgentSession) -> String {
 
 /// Sister-message to `unsupported_remote_control_session_error`, surfaced
 /// at the pre-spawn gate (before any agent process exists) when the
-/// resolved backend runtime is not the Claude CLI. Per-card runtime
-/// overrides flipped Ollama/LM Studio defaults to Pi in PR #813; this
-/// keeps the Remote Control entry point from quietly starting the wrong
-/// binary.
+/// resolved backend runtime is not the Claude CLI (e.g. a Codex Native
+/// card on the Codex app-server harness). Keeps the Remote Control entry
+/// point from quietly starting the wrong binary.
 fn remote_control_requires_claude_cli_message(harness: AgentBackendRuntimeHarness) -> String {
     let harness_label = match harness {
         AgentBackendRuntimeHarness::ClaudeCode => "Claude CLI",
         AgentBackendRuntimeHarness::CodexAppServer => "Codex app-server",
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendRuntimeHarness::PiSdk => "Pi SDK",
     };
     format!(
         "Claude Remote Control requires the Claude CLI runtime, but this backend is configured to run through the {harness_label} runtime. \
-         Switch this backend's runtime to Claude CLI in Settings → Models → Runtime, or pick a different backend before enabling Remote Control."
+         Pick a backend that runs on the Claude CLI before enabling Remote Control."
     )
 }
 
@@ -524,12 +521,10 @@ async fn ensure_persistent_session_for_remote_control(
     // Claude Remote Control is a Claude-CLI feature (it requires the
     // `--remote-control` flag and the Claudette MCP bridge that ships
     // with the CLI). If the selected backend resolves to any other
-    // harness — e.g. an Ollama/LM Studio card that now defaults to
-    // PiSdk — launching `ClaudeCodeHarness::start_persistent` would
-    // either fail outright or run the Claude CLI with a local-model
-    // env (no Anthropic gateway). Reject the request up front with a
-    // message that points the user at the Settings → Models → Runtime
-    // override so they can fix it in one place.
+    // harness — e.g. a Codex Native card on the Codex app-server —
+    // launching `ClaudeCodeHarness::start_persistent` would either fail
+    // outright or run the Claude CLI with a mismatched backend env.
+    // Reject the request up front with an actionable message.
     if backend_runtime.harness != AgentBackendRuntimeHarness::ClaudeCode {
         return Err(remote_control_requires_claude_cli_message(
             backend_runtime.harness,
@@ -1529,27 +1524,13 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pi-sdk")]
-    #[test]
-    fn remote_control_rejects_pi_runtime_with_actionable_message() {
-        // Per-card runtime overrides (PR #813) let Ollama / LM Studio /
-        // OpenAI cards resolve to PiSdk as their default harness. The
-        // Remote Control path can't run on a non-Claude harness — it
-        // calls `--remote-control` on the Claude binary and only the
-        // Claude MCP bridge speaks the protocol — so the gate must
-        // reject before any process is started and point the user at
-        // the Settings override that fixes it.
-        let msg = remote_control_requires_claude_cli_message(AgentBackendRuntimeHarness::PiSdk);
-        assert!(msg.contains("Pi SDK"));
-        assert!(msg.contains("Claude CLI"));
-        assert!(msg.contains("Settings → Models → Runtime"));
-    }
-
     #[test]
     fn remote_control_rejects_codex_runtime_with_actionable_message() {
-        // Symmetric guard for the Codex app-server runtime so a future
-        // Codex Native + Remote Control combo doesn't silently boot the
-        // Claude CLI with a Codex backend env.
+        // The Remote Control path can't run on a non-Claude harness — it
+        // calls `--remote-control` on the Claude binary and only the
+        // Claude MCP bridge speaks the protocol — so the gate must reject
+        // a Codex-app-server card before any process is started and point
+        // the user at a working alternative.
         let msg =
             remote_control_requires_claude_cli_message(AgentBackendRuntimeHarness::CodexAppServer);
         assert!(msg.contains("Codex app-server"));

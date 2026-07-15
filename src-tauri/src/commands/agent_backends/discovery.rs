@@ -7,7 +7,6 @@
 //! - The Codex CLI (`codex debug models` + `codex login status`) for the
 //!   subscription-auth catalog
 //! - The Codex app-server's `list_models` for native-Codex picker rows
-//! - The Pi sidecar's discoverModels (pi-sdk feature only)
 //!
 //! Also owns the small Codex-CLI command builder that suppresses the
 //! Windows console window for every probe and the OpenAI URL builder
@@ -21,9 +20,6 @@ use claudette::agent::{
 use claudette::agent_backend::{AgentBackendConfig, AgentBackendKind, AgentBackendModel};
 use claudette::plugin::load_secure_secret;
 use serde_json::Value;
-
-#[cfg(feature = "pi-sdk")]
-use claudette::agent::PiSdkSession;
 
 use super::config::{BackendStatus, SECRET_BUCKET};
 
@@ -97,8 +93,6 @@ pub(super) async fn discover_models(
         AgentBackendKind::CodexSubscription => discover_codex_models().await,
         AgentBackendKind::CodexNative => discover_codex_native_models(backend).await,
         AgentBackendKind::LmStudio => discover_lm_studio_models(backend).await,
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => discover_pi_models(backend).await,
         _ => Ok(backend.manual_models.clone()),
     }
 }
@@ -120,16 +114,6 @@ pub(super) async fn test_backend_connectivity(
             ))
         }
         AgentBackendKind::CodexNative => test_codex_native_connectivity(backend).await,
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => discover_pi_models(backend).await.map(|models| {
-            BackendStatus::new(
-                true,
-                format!(
-                    "Pi SDK harness is available. Found {} model(s). Use `pi auth` to configure providers.",
-                    models.len()
-                ),
-            )
-        }),
         AgentBackendKind::OpenAiApi => discover_openai_api_models(backend).await.map(|models| {
             BackendStatus::new(
                 true,
@@ -273,56 +257,6 @@ async fn discover_lm_studio_models(
         &value,
         backend.context_window_default,
     ))
-}
-
-#[cfg(feature = "pi-sdk")]
-async fn discover_pi_models(
-    backend: &AgentBackendConfig,
-) -> Result<Vec<AgentBackendModel>, String> {
-    // Run discovery from the OS temp dir rather than `.` so a Settings
-    // "Refresh models" click can't sweep in workspace state via the
-    // sidecar's cwd. Discovery never touches tools, so the cwd only
-    // matters for `precheck_cwd`; `std::env::temp_dir()` is always
-    // present and identical for every refresh.
-    let cwd = std::env::temp_dir();
-    // Thread keychain-only provider secrets through so Refresh models
-    // sees the same providers as `list_providers`. Without this, a
-    // user who configured OpenRouter with "Keep this key private to
-    // Claudette" would see the provider as configured in the Pi card
-    // but Refresh would still return zero models for it.
-    //
-    // Propagate keychain-read errors instead of dropping them — a
-    // dead secure store has the same symptom (no models discovered)
-    // as a misconfigured provider, and the user needs to know it's
-    // the store, not Pi. `pi_list_providers` and chat startup already
-    // surface this error; mirror that here.
-    let extras = super::pi_auth::pi_local_secret_env()?;
-    let extras_slice: Option<&[(String, String)]> = if extras.is_empty() {
-        None
-    } else {
-        Some(extras.as_slice())
-    };
-    let discovered = PiSdkSession::discover_models_with_env(&cwd, extras_slice).await?;
-    let models: Vec<AgentBackendModel> = discovered
-        .into_iter()
-        .map(|model| AgentBackendModel {
-            id: model.id.clone(),
-            label: if model.label.trim().is_empty() {
-                model.id
-            } else {
-                model.label
-            },
-            context_window_tokens: model
-                .context_window_tokens
-                .unwrap_or(backend.context_window_default),
-            discovered: true,
-        })
-        .collect();
-    // Return an empty Vec when discovery turns up nothing so that
-    // `apply_discovered_models`'s `!discovered.is_empty()` guard keeps the
-    // user's manual_models intact. Substituting the seed list here used to
-    // trick that guard into clearing user-entered manual models.
-    Ok(models)
 }
 
 pub(super) fn lm_studio_models_from_v0(
