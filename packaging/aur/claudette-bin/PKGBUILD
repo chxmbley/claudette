@@ -27,8 +27,8 @@ depends=(
 )
 
 # `claude-code` is the primary use case but lives in optdepends
-# because alt-backends (Codex Native, Pi, OpenAI, LM Studio, Ollama)
-# are first-class agent runtimes — a user installing claudette-bin
+# because alt-backends (Codex Native, OpenAI, Ollama) are first-class
+# agent runtimes — a user installing claudette-bin
 # specifically to drive Codex shouldn't be forced to pull a Node-
 # heavy claude-code tree. The upstream .deb makes the same call:
 # the CLI is runtime-probed, not declared as a Depends. The AUR

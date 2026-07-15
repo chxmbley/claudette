@@ -74,9 +74,10 @@ jobs:
             rust-target: x86_64-apple-darwin
             bundles: app,dmg
             label: macos-x86_64
-          # See nightly.yml for the rationale — `appimage` is dropped on
-          # Linux because `linuxdeploy` segfaults on the Bun-compiled Pi
-          # harness sidecar. `.deb` bundling bypasses linuxdeploy and works.
+          # See nightly.yml — `appimage` is dropped on Linux (`.deb` only).
+          # The original blocker (linuxdeploy vs the Pi harness sidecar) is
+          # gone now that Pi is removed; re-enabling appimage is a separate
+          # release-artifact decision.
           - platform: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
             bundles: deb

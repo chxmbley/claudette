@@ -237,17 +237,6 @@ if [ -n "$host_triple" ] && [ -d "$staged_dir" ]; then
     echo "▸ Mirrored sidecar ${base} → MacOS/${stripped}"
   done
   shopt -u nullglob
-  # Pi SDK metadata: `resolve_pi_package_dir` in `src/agent/pi_sdk.rs` looks
-  # for `binaries/pi/` adjacent to the main exe (release Tauri places it in
-  # `Contents/Resources/binaries/pi/` because the entry in `bundle.resources`
-  # preserves its path). Mirror the same layout so the Pi harness sidecar
-  # can find package.json in dev too.
-  if [ -f "$staged_dir/pi/package.json" ]; then
-    resource_pi_dir="$resources_dir/binaries/pi"
-    mkdir -p "$resource_pi_dir"
-    cp "$staged_dir/pi/package.json" "$resource_pi_dir/package.json"
-    echo "▸ Mirrored pi/package.json → Resources/binaries/pi/"
-  fi
 fi
 
 cat >"$contents_dir/Info.plist" <<'PLIST'

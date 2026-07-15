@@ -105,7 +105,6 @@ build() {
     --bundles deb \
     --no-default-features \
     --features tauri/custom-protocol,server,voice,alternative-backends \
-    -c src-tauri/tauri.no-pi.conf.json \
     --verbose
 }
 

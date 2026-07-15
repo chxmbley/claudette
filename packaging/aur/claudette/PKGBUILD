@@ -96,18 +96,11 @@ build() {
   esac
   scripts/stage-cli-sidecar.sh "${target}"
 
-  # The Pi harness sidecar is a Bun-compiled TS executable. We drop
-  # it on the source build path so AUR users don't need bun + a
-  # second build step. The `tauri.no-pi.conf.json` overlay removes
-  # the externalBin reference; `--no-default-features` drops the
-  # Rust glue. Codex Native and the rest of `alternative-backends`
-  # stay available.
   cargo tauri build \
     --target "${target}" \
     --bundles deb \
     --no-default-features \
     --features tauri/custom-protocol,server,voice,alternative-backends \
-    -c src-tauri/tauri.no-pi.conf.json \
     --verbose
 }
 

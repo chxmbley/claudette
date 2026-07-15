@@ -118,17 +118,11 @@ jobs:
             rust-target: x86_64-apple-darwin
             bundles: app,dmg
             label: macos-x86_64
-          # `appimage` is intentionally omitted on Linux. `linuxdeploy`'s gtk
-          # plugin segfaults (SIGABRT, exit 134) when it tries to extract
-          # DT_NEEDED entries from the Pi harness sidecar — a ~93 MB ELF that
-          # `bun build --compile` produces with the JS bytecode appended in
-          # a section linuxdeploy can't parse. The only way around it inside
-          # linuxdeploy's scan-everything-in-usr/bin model is to take the
-          # sidecar out of `externalBin`, which is a multi-file refactor
-          # (tauri.conf.json, staging script, resolve_pi_harness_path). Until
-          # that lands, `.deb` is the Linux nightly artifact — its bundler
-          # never invokes linuxdeploy, so the same sidecar bundles fine.
-          # Tracked in: https://github.com/utensils/Claudette/issues/825
+          # `appimage` is omitted on Linux; `.deb` is the Linux nightly
+          # artifact. The original blocker (linuxdeploy segfaulting on the
+          # Bun-compiled Pi harness sidecar, issue #825) is gone now that
+          # the Pi sidecar has been removed, so re-enabling `appimage` here
+          # is unblocked — but that's a separate release-artifact decision.
           - platform: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
             bundles: deb
