@@ -42,7 +42,6 @@ pub(super) fn default_backends_for_gate(native_codex_enabled: bool) -> Vec<Agent
         AgentBackendConfig::builtin_anthropic(),
         AgentBackendConfig::builtin_ollama(),
         AgentBackendConfig::builtin_openai_api(),
-        AgentBackendConfig::builtin_lm_studio(),
     ];
     if native_codex_enabled {
         backends.insert(3, AgentBackendConfig::builtin_codex_native());

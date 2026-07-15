@@ -17,10 +17,6 @@
       "default": "claude_code",
       "available": ["claude_code"]
     },
-    "lm_studio": {
-      "default": "claude_code",
-      "available": ["claude_code"]
-    },
     "openai_api": {
       "default": "claude_code",
       "available": ["claude_code"]

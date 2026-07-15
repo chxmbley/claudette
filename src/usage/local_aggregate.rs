@@ -165,12 +165,8 @@ pub fn snapshot_from_locals(
     // It would also be misleading: `chat_messages.cost_usd` is summed
     // across the whole workspace over 24h, so a stray Claude / Codex
     // turn earlier in the day would surface a dollar number under an
-    // Ollama header. Suppress it entirely for the two backends whose
-    // runtime is by definition local.
-    let track_cost = !matches!(
-        provider_kind,
-        AgentBackendKind::Ollama | AgentBackendKind::LmStudio
-    );
+    // Ollama header. Suppress it entirely for local backends.
+    let track_cost = !matches!(provider_kind, AgentBackendKind::Ollama);
 
     let augment_cost = |agg: &LocalAggregate| -> f64 {
         if !track_cost {
@@ -431,9 +427,9 @@ mod tests {
     #[test]
     fn snapshot_suppresses_cost_for_local_only_backends() {
         // Even when chat_messages.cost_usd has data (e.g. from a prior
-        // paid-backend turn in the same workspace), Ollama / LmStudio
-        // backends should never surface a dollar readout — their
-        // inference is local and has no marginal cost.
+        // paid-backend turn in the same workspace), the Ollama backend
+        // should never surface a dollar readout — its inference is local
+        // and has no marginal cost.
         let session = LocalAggregate {
             input_tokens: 5_000,
             output_tokens: 2_000,
@@ -441,24 +437,23 @@ mod tests {
             message_count: 1,
             ..Default::default()
         };
-        for kind in [AgentBackendKind::Ollama, AgentBackendKind::LmStudio] {
-            let snap = snapshot_from_locals(
-                kind,
-                "Ollama",
-                session.clone(),
-                LocalAggregate::default(),
-                Some("gpt-5.4"), // even with a model that maps to pricing
-                Vec::new(),
-                0,
-            );
-            let bucket = &snap.buckets[0];
-            assert_eq!(bucket.key, "local_session");
-            assert!(
-                bucket.secondary_text.is_none(),
-                "{kind:?} bucket should have no cost readout, got {:?}",
-                bucket.secondary_text,
-            );
-        }
+        let kind = AgentBackendKind::Ollama;
+        let snap = snapshot_from_locals(
+            kind,
+            "Ollama",
+            session.clone(),
+            LocalAggregate::default(),
+            Some("gpt-5.4"), // even with a model that maps to pricing
+            Vec::new(),
+            0,
+        );
+        let bucket = &snap.buckets[0];
+        assert_eq!(bucket.key, "local_session");
+        assert!(
+            bucket.secondary_text.is_none(),
+            "{kind:?} bucket should have no cost readout, got {:?}",
+            bucket.secondary_text,
+        );
     }
 
     #[test]

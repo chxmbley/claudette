@@ -149,18 +149,6 @@ async fn build_claude_code_gateway_runtime(
             "1".to_string(),
         ),
     ];
-    // LM Studio benefits from the same KV-cache reuse fix Ollama gets:
-    // suppress Claude Code's rotating attribution header so identical
-    // request prefixes hit LM Studio's prefix cache turn after turn.
-    // (Routing-wise LM Studio still goes through our gateway because
-    // it returns HTTP 500 for context-overflow, which the SDK retries
-    // unless we demote it to 4xx. See `proxy_anthropic_messages`.)
-    if backend.kind == AgentBackendKind::LmStudio {
-        env.push((
-            "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
-            "0".to_string(),
-        ));
-    }
     append_custom_model_env(&mut env, backend, model);
     Ok(AgentBackendRuntime {
         backend_id: Some(backend.id.clone()),
@@ -195,10 +183,6 @@ pub(super) fn build_claude_code_direct_runtime(
         // backends (see github.com/anthropics/claude-code/issues/29230,
         // roborhythms.com/stop-claude-code-slowing-local-llm-by-90).
         // Ollama doesn't bill anything, so the header is pure overhead.
-        // LM Studio gets the same env via the gateway-routed path
-        // (where we forward this env via the spawned CLI's environment
-        // and the gateway itself strips the header from upstream
-        // requests).
         env.push((
             "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
             "0".to_string(),
@@ -332,9 +316,7 @@ async fn hydrate_gateway_models_for_runtime(
 ) -> Result<(), String> {
     if !matches!(
         backend.kind,
-        AgentBackendKind::OpenAiApi
-            | AgentBackendKind::CodexSubscription
-            | AgentBackendKind::LmStudio
+        AgentBackendKind::OpenAiApi | AgentBackendKind::CodexSubscription
     ) {
         return Ok(());
     }
@@ -342,15 +324,7 @@ async fn hydrate_gateway_models_for_runtime(
     let selected_is_known = model
         .map(|model| backend_models_contain(backend, model))
         .unwrap_or(true);
-    // LM Studio's loaded_context_length changes every time the user
-    // reloads the model with a different context slider, so we can't
-    // trust a cached discovery response here — the pre-flight gate uses
-    // that value as ground truth. Always re-discover on the chat-send
-    // hot path; it's a single GET to localhost (typically <50ms) and a
-    // stale cache means the user sees a 4k-context error after they
-    // already reloaded the model with 256k.
-    let force_refresh = matches!(backend.kind, AgentBackendKind::LmStudio);
-    if !force_refresh && has_models && selected_is_known {
+    if has_models && selected_is_known {
         return Ok(());
     }
 

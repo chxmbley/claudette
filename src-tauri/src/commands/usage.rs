@@ -124,7 +124,6 @@ pub async fn get_session_usage(
             (String::from("OpenAI"), Vec::new())
         }
         AgentBackendKind::Ollama => (String::from("Ollama"), Vec::new()),
-        AgentBackendKind::LmStudio => (String::from("LM Studio"), Vec::new()),
         // Anthropic-family already handled above; fall through for
         // forward-compat if a new variant is added without a matching
         // dispatch arm.

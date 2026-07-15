@@ -99,7 +99,7 @@ pub(super) fn apply_discovered_models(
     discovered: Vec<AgentBackendModel>,
 ) {
     // Kinds where a successful discovery pass replaces manual entries:
-    // Ollama / LM Studio / cloud OpenAI / Codex auto-detect the server's
+    // Ollama / cloud OpenAI / Codex auto-detect the server's
     // own model list and the picker is supposed to mirror that source of
     // truth — leaving stale manual rows behind confuses the UI.
     let clears_manual = matches!(
@@ -108,7 +108,6 @@ pub(super) fn apply_discovered_models(
             | AgentBackendKind::OpenAiApi
             | AgentBackendKind::CodexSubscription
             | AgentBackendKind::CodexNative
-            | AgentBackendKind::LmStudio
     );
     if clears_manual && !discovered.is_empty() {
         backend.manual_models.clear();
@@ -439,7 +438,6 @@ pub(super) fn normalize_backend(mut backend: AgentBackendConfig) -> AgentBackend
             | AgentBackendKind::OpenAiApi
             | AgentBackendKind::CodexSubscription
             | AgentBackendKind::CodexNative
-            | AgentBackendKind::LmStudio
     );
     if model_discovery_kinds {
         backend.model_discovery = true;
@@ -523,7 +521,6 @@ pub(super) fn backend_kind_hash_key(kind: AgentBackendKind) -> &'static str {
         AgentBackendKind::CodexNative => "codex_native",
         AgentBackendKind::CustomAnthropic => "custom_anthropic",
         AgentBackendKind::CustomOpenAi => "custom_openai",
-        AgentBackendKind::LmStudio => "lm_studio",
     }
 }
 

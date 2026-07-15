@@ -1,7 +1,6 @@
 //! Per-backend model-list discovery + connectivity checks. Talks to:
 //!
 //! - Ollama's /api/tags
-//! - LM Studio's /api/v0/models (preferred) and OpenAI-shaped /v1/models
 //! - Cloud OpenAI's /v1/models
 //! - Custom Anthropic gateways' /v1/models
 //! - The Codex CLI (`codex debug models` + `codex login status`) for the
@@ -92,7 +91,6 @@ pub(super) async fn discover_models(
         AgentBackendKind::OpenAiApi => discover_openai_api_models(backend).await,
         AgentBackendKind::CodexSubscription => discover_codex_models().await,
         AgentBackendKind::CodexNative => discover_codex_native_models(backend).await,
-        AgentBackendKind::LmStudio => discover_lm_studio_models(backend).await,
         _ => Ok(backend.manual_models.clone()),
     }
 }
@@ -183,117 +181,6 @@ async fn discover_openai_api_models(
         &value,
         backend.context_window_default,
     )))
-}
-
-async fn discover_lm_studio_models(
-    backend: &AgentBackendConfig,
-) -> Result<Vec<AgentBackendModel>, String> {
-    let base = backend
-        .base_url
-        .as_deref()
-        .unwrap_or("http://localhost:1234")
-        .trim_end_matches('/');
-    // Treat secure-store failures as soft (a corrupt keychain entry is
-    // distinct from "no secret was ever set") and tell the user via the
-    // log so a discovery-fails-silently bug is debuggable. A missing /
-    // blank secret is fine — LM Studio accepts any bearer locally and
-    // we substitute a placeholder below.
-    let secret = match load_secure_secret(SECRET_BUCKET, &backend.id) {
-        Ok(maybe) => maybe,
-        Err(err) => {
-            tracing::warn!(
-                target: "claudette::backend",
-                backend_id = %backend.id,
-                error = %err,
-                "LM Studio secret unreadable from secure store — falling back to placeholder bearer for discovery"
-            );
-            None
-        }
-    };
-    // LM Studio's local server accepts any bearer — empty included — but
-    // some users front it with an authenticating proxy that rejects
-    // requests *without* an Authorization header even if the value
-    // doesn't matter. Always send a bearer (user-supplied or the
-    // `lm-studio` placeholder) so discovery works in both setups,
-    // matching what the runtime path does.
-    let bearer = secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("lm-studio")
-        .to_string();
-    let client = reqwest::Client::new();
-
-    // Prefer LM Studio's native v0 endpoint, which exposes per-model
-    // max_context_length / loaded_context_length. Fall back to the OpenAI-shaped
-    // /v1/models if v0 is missing (older or stripped builds).
-    let v0_response = client
-        .get(format!("{base}/api/v0/models"))
-        .bearer_auth(&bearer)
-        .send()
-        .await;
-    if let Ok(response) = v0_response
-        && response.status().is_success()
-        && let Ok(value) = response.json::<Value>().await
-    {
-        let models = lm_studio_models_from_v0(&value, backend.context_window_default);
-        if !models.is_empty() {
-            return Ok(models);
-        }
-    }
-
-    let value = client
-        .get(openai_api_url(base, "models"))
-        .bearer_auth(&bearer)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to query LM Studio: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("LM Studio model discovery failed: {e}"))?
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("Invalid LM Studio model response: {e}"))?;
-    Ok(models_from_openai_shape(
-        &value,
-        backend.context_window_default,
-    ))
-}
-
-pub(super) fn lm_studio_models_from_v0(
-    value: &Value,
-    default_context: u32,
-) -> Vec<AgentBackendModel> {
-    value
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            let id = model.get("id").and_then(Value::as_str)?;
-            // Skip embedding/vision-only entries — they aren't usable as chat
-            // backends for the agent loop. Everything else (LLM, instruct,
-            // unknown) is fair game.
-            if model
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.eq_ignore_ascii_case("embeddings"))
-            {
-                return None;
-            }
-            let context = model
-                .get("loaded_context_length")
-                .or_else(|| model.get("max_context_length"))
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-                .unwrap_or(default_context);
-            Some(AgentBackendModel {
-                id: id.to_string(),
-                label: id.to_string(),
-                context_window_tokens: context,
-                discovered: true,
-            })
-        })
-        .collect()
 }
 
 pub(super) async fn discover_codex_models() -> Result<Vec<AgentBackendModel>, String> {

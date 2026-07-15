@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use claudette::agent_backend::{AgentBackendConfig, AgentBackendKind};
+use claudette::agent_backend::AgentBackendConfig;
 use rand::RngCore;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,9 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, RwLock};
 
 use super::config::runtime_hash;
-use super::gateway_translate::{
-    call_openai_responses, proxy_anthropic_messages, write_anthropic_error_response,
-};
+use super::gateway_translate::{call_openai_responses, write_anthropic_error_response};
 
 #[derive(Debug, Clone)]
 struct GatewayServer {
@@ -251,28 +249,10 @@ async fn handle_gateway_connection(
         ("POST", "/v1/messages") => {
             let req = serde_json::from_slice::<Value>(body)
                 .map_err(|e| format!("invalid messages request: {e}"))?;
-            // LM Studio speaks Anthropic's wire format natively — there's
-            // no OpenAI-Responses translation work to do, just forward
-            // bytes. The pass-through writes the response (including
-            // streaming SSE) directly to the client TCP stream so we
-            // preserve TTFT, and intercepts non-2xx upstream responses
-            // to apply the same status-demotion logic the gateway uses
-            // for OpenAI-shape backends (otherwise LM Studio's HTTP 500
-            // for context-overflow triggers the SDK's retry-with-backoff
-            // path and the user sees a multi-minute spinner instead of
-            // the actual error message).
-            if config.kind == AgentBackendKind::LmStudio {
-                match proxy_anthropic_messages(&config, &req, &mut stream).await {
-                    Ok(()) => Ok(()),
-                    Err(err) => write_anthropic_error_response(&mut stream, err).await,
-                }
-            } else {
-                let response =
-                    call_openai_responses(&config, upstream_secret.as_deref(), req).await;
-                match response {
-                    Ok(message) => write_json_or_sse_response(&mut stream, message).await,
-                    Err(err) => write_anthropic_error_response(&mut stream, err).await,
-                }
+            let response = call_openai_responses(&config, upstream_secret.as_deref(), req).await;
+            match response {
+                Ok(message) => write_json_or_sse_response(&mut stream, message).await,
+                Err(err) => write_anthropic_error_response(&mut stream, err).await,
             }
         }
         _ => {

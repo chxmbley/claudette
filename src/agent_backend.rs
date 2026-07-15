@@ -12,7 +12,6 @@ pub enum AgentBackendKind {
     CustomAnthropic,
     #[serde(rename = "custom_openai")]
     CustomOpenAi,
-    LmStudio,
 }
 
 impl AgentBackendKind {
@@ -21,28 +20,9 @@ impl AgentBackendKind {
     }
 
     pub fn needs_gateway(self) -> bool {
-        // LM Studio 0.4.1+ implements `/v1/messages` natively (same
-        // Anthropic wire format Ollama uses), so we *could* point the
-        // spawned claude CLI directly at it. But LM Studio classifies
-        // hard input errors like context-window overflow as HTTP 500
-        // with an Anthropic-shaped body whose `error.type` is
-        // `api_error`. That's a transient classification — Anthropic's
-        // SDK retries it with exponential backoff — so a permanent
-        // input failure ends up as a multi-minute spinner with no
-        // surfaced error, even though the upstream message is right
-        // there.
-        //
-        // Routing LM Studio through our gateway gives us a place to
-        // demote those mis-classified 5xx responses to 4xx (via
-        // `GatewayUpstreamError::from_upstream` +
-        // `upstream_message_is_permanent_failure`). The gateway
-        // forwards 2xx bodies through unchanged so streaming events
-        // still flow without translation overhead — only the error
-        // path gets rewritten. See `proxy_anthropic_messages` and the
-        // matching test fixtures.
         matches!(
             self,
-            Self::OpenAiApi | Self::CodexSubscription | Self::CustomOpenAi | Self::LmStudio
+            Self::OpenAiApi | Self::CodexSubscription | Self::CustomOpenAi
         )
     }
 
@@ -54,14 +34,12 @@ impl AgentBackendKind {
     pub fn default_harness(self) -> AgentBackendRuntimeHarness {
         match self {
             // Anthropic-compatible backends and local model runtimes
-            // (Ollama, LM Studio) run through the Claude CLI, which
-            // inherits the parent process's auth or a gateway-provided
-            // base URL.
+            // (Ollama) run through the Claude CLI, which inherits the
+            // parent process's auth or a gateway-provided base URL.
             Self::Anthropic
             | Self::CustomAnthropic
             | Self::CodexSubscription
             | Self::Ollama
-            | Self::LmStudio
             | Self::OpenAiApi
             | Self::CustomOpenAi => AgentBackendRuntimeHarness::ClaudeCode,
             Self::CodexNative => AgentBackendRuntimeHarness::CodexAppServer,
@@ -77,7 +55,6 @@ impl AgentBackendKind {
             | Self::CustomAnthropic
             | Self::CodexSubscription
             | Self::Ollama
-            | Self::LmStudio
             | Self::OpenAiApi
             | Self::CustomOpenAi => &[AgentBackendRuntimeHarness::ClaudeCode],
             Self::CodexNative => &[AgentBackendRuntimeHarness::CodexAppServer],
@@ -300,27 +277,6 @@ impl AgentBackendConfig {
         }
     }
 
-    pub fn builtin_lm_studio() -> Self {
-        Self {
-            id: "lm-studio".to_string(),
-            label: "LM Studio".to_string(),
-            kind: AgentBackendKind::LmStudio,
-            base_url: Some("http://localhost:1234".to_string()),
-            enabled: false,
-            default_model: None,
-            manual_models: Vec::new(),
-            discovered_models: Vec::new(),
-            auth_ref: Some("agent-backend:lm-studio".to_string()),
-            capabilities: AgentBackendCapabilities::gateway(),
-            // Most LM Studio loadouts default to a 4-8k context window; pick a
-            // safer floor than the OpenAI-style 400k. Per-model values from
-            // /api/v0/models override this when discovery succeeds.
-            context_window_default: 8_192,
-            model_discovery: true,
-            has_secret: false,
-            runtime_harness: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,10 +361,6 @@ mod tests {
             ),
             (
                 AgentBackendKind::Ollama,
-                AgentBackendRuntimeHarness::ClaudeCode,
-            ),
-            (
-                AgentBackendKind::LmStudio,
                 AgentBackendRuntimeHarness::ClaudeCode,
             ),
             (
@@ -523,7 +475,6 @@ mod tests {
             AgentBackendKind::CodexNative => "codex_native",
             AgentBackendKind::CustomAnthropic => "custom_anthropic",
             AgentBackendKind::CustomOpenAi => "custom_openai",
-            AgentBackendKind::LmStudio => "lm_studio",
         }
     }
 
@@ -544,7 +495,6 @@ mod tests {
             AgentBackendKind::CodexNative,
             AgentBackendKind::CustomAnthropic,
             AgentBackendKind::CustomOpenAi,
-            AgentBackendKind::LmStudio,
         ];
 
         // Fixture must list exactly the variants Rust knows about — no
@@ -623,7 +573,6 @@ mod tests {
             AgentBackendConfig::builtin_openai_api(),
             AgentBackendConfig::builtin_codex_subscription(),
             AgentBackendConfig::builtin_codex_native(),
-            AgentBackendConfig::builtin_lm_studio(),
         ];
         for backend in builtins {
             assert!(
@@ -632,20 +581,6 @@ mod tests {
                 backend.kind,
             );
         }
-    }
-
-    #[test]
-    fn lm_studio_builtin_uses_gateway_shape() {
-        let backend = AgentBackendConfig::builtin_lm_studio();
-
-        assert_eq!(backend.id, "lm-studio");
-        assert_eq!(backend.label, "LM Studio");
-        assert_eq!(backend.kind, AgentBackendKind::LmStudio);
-        assert!(!backend.enabled);
-        assert_eq!(backend.base_url.as_deref(), Some("http://localhost:1234"));
-        assert!(backend.model_discovery);
-        assert!(!backend.capabilities.thinking);
-        assert_eq!(backend.context_window_default, 8_192);
     }
 
     #[test]

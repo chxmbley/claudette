@@ -99,15 +99,10 @@ pub async fn auto_detect_agent_backends(
         .iter()
         .find(|backend| backend.id == "ollama")
         .cloned();
-    let lm_studio = backends
-        .iter()
-        .find(|backend| backend.id == "lm-studio")
-        .cloned();
     let probe_codex = should_probe_backend_auto_detection(&db, NATIVE_CODEX_BACKEND_ID)?;
     let probe_ollama = should_probe_backend_auto_detection(&db, "ollama")?;
-    let probe_lm_studio = should_probe_backend_auto_detection(&db, "lm-studio")?;
 
-    let (codex_detection, ollama_detection, lm_studio_detection) = tokio::join!(
+    let (codex_detection, ollama_detection) = tokio::join!(
         async move {
             if probe_codex {
                 probe_codex_backend(codex).await
@@ -122,15 +117,8 @@ pub async fn auto_detect_agent_backends(
                 skipped_backend_auto_detection("ollama")
             }
         },
-        async move {
-            if probe_lm_studio {
-                probe_model_discovery_backend(lm_studio).await
-            } else {
-                skipped_backend_auto_detection("lm-studio")
-            }
-        },
     );
-    let mut detections = vec![codex_detection, ollama_detection, lm_studio_detection];
+    let mut detections = vec![codex_detection, ollama_detection];
     if detections.iter().any(|detection| {
         canonical_backend_id(&detection.backend_id) == NATIVE_CODEX_BACKEND_ID && detection.detected
     }) && !backend_auto_detect_disabled(&db, NATIVE_CODEX_BACKEND_ID)?
@@ -238,7 +226,6 @@ pub async fn delete_agent_backend(
             | "codex-subscription"
             | "codex"
             | "experimental-codex"
-            | "lm-studio"
     ) {
         return Err("Built-in backends can be disabled but not deleted".to_string());
     }
@@ -567,8 +554,8 @@ mod tests {
     };
     use super::discovery::{
         codex_models_from_debug_catalog, codex_native_models_from_app_server,
-        ensure_codex_native_authenticated, filter_openai_models, lm_studio_models_from_v0,
-        models_from_openai_shape, openai_api_url,
+        ensure_codex_native_authenticated, filter_openai_models, models_from_openai_shape,
+        openai_api_url,
     };
     use super::gateway::{
         anthropic_sse_body, gateway_auth_matches, gateway_route_requires_auth, route_path,
@@ -894,12 +881,6 @@ mod tests {
                 discovered_models: vec![model("qwen3-coder")],
                 warning: None,
             },
-            BackendAutoDetection {
-                backend_id: "lm-studio".to_string(),
-                detected: true,
-                discovered_models: vec![model("local-model")],
-                warning: None,
-            },
         ];
 
         let (changed, warnings) = apply_backend_auto_detections(&db, &mut backends, &detections)
@@ -909,15 +890,9 @@ mod tests {
         assert!(warnings.is_empty());
         let codex = backends.iter().find(|b| b.id == "codex").expect("codex");
         let ollama = backends.iter().find(|b| b.id == "ollama").expect("ollama");
-        let lm_studio = backends
-            .iter()
-            .find(|b| b.id == "lm-studio")
-            .expect("lm studio");
         assert!(codex.enabled);
         assert!(ollama.enabled);
         assert_eq!(ollama.default_model.as_deref(), Some("qwen3-coder"));
-        assert!(lm_studio.enabled);
-        assert_eq!(lm_studio.default_model.as_deref(), Some("local-model"));
     }
 
     #[test]
@@ -1023,8 +998,8 @@ mod tests {
                 .expect("legacy codex probe flag should load")
         );
         assert!(
-            should_probe_backend_auto_detection(&db, "lm-studio")
-                .expect("lm studio probe flag should load")
+            should_probe_backend_auto_detection(&db, "openai-api")
+                .expect("openai-api probe flag should load")
         );
         let skipped = skipped_backend_auto_detection("ollama");
         assert_eq!(skipped.backend_id, "ollama");
@@ -1071,10 +1046,11 @@ mod tests {
 
     #[test]
     fn tolerant_load_skips_unknown_kind_and_preserves_passthrough() {
-        // Simulates the reported breakage: a newer build wrote a
-        // `lm_studio` entry, an older build is now reading it. The
-        // unknown entry must NOT take down the rest of the panel —
-        // valid entries (and the built-in defaults) should still load.
+        // Simulates a stored backend whose `kind` this build doesn't
+        // recognize (e.g. a removed kind like `pi_sdk` / `lm_studio` on a
+        // downgrade, or a future kind). The unknown entry must NOT take
+        // down the rest of the panel — valid entries (and the built-in
+        // defaults) should still load.
         let db = Database::open_in_memory().expect("test db should open");
         let mut ollama = AgentBackendConfig::builtin_ollama();
         ollama.enabled = true;
@@ -1580,20 +1556,9 @@ mod tests {
     }
 
     #[test]
-    fn lm_studio_routing_classification_pinned() {
-        // Pinned: LM Studio MUST stay on the gateway path. Direct
-        // routing (`is_anthropic_compatible() == true`) loses our
-        // status-code translation, and LM Studio's HTTP 500 for
-        // context-overflow ends up in the SDK's retry-with-backoff
-        // path — the user sees a multi-minute spinner instead of the
-        // actual error. The gateway uses `proxy_anthropic_messages`
-        // (not the OpenAI-Responses translator) so streaming
-        // pass-through is preserved; only error status codes get
-        // rewritten on the way back.
-        assert!(AgentBackendKind::LmStudio.needs_gateway());
-        assert!(!AgentBackendKind::LmStudio.is_anthropic_compatible());
-        // Sanity-check the rest of the matrix to catch a copy-paste
-        // misclassification of an unrelated kind.
+    fn gateway_routing_classification_pinned() {
+        // Sanity-check the routing matrix to catch a copy-paste
+        // misclassification of a kind.
         assert!(AgentBackendKind::Anthropic.is_anthropic_compatible());
         assert!(AgentBackendKind::Ollama.is_anthropic_compatible());
         assert!(AgentBackendKind::CustomAnthropic.is_anthropic_compatible());
@@ -1604,11 +1569,10 @@ mod tests {
 
     #[test]
     fn runtime_hash_changes_when_discovered_context_window_changes() {
-        // Regression: LM Studio's loaded_context_length changes when the
-        // user reloads a model with a different context slider. The
-        // gateway must respawn on that change so the pre-flight check
+        // A discovered model's context window can change between refreshes;
+        // the gateway must respawn on that change so the pre-flight check
         // doesn't keep using the stale context size.
-        let mut backend = AgentBackendConfig::builtin_lm_studio();
+        let mut backend = AgentBackendConfig::builtin_openai_api();
         backend.discovered_models = vec![AgentBackendModel {
             id: "qwen3.6-35b-a3b-ud-mlx".to_string(),
             label: "qwen3.6-35b-a3b-ud-mlx".to_string(),
@@ -1637,10 +1601,6 @@ mod tests {
         assert_eq!(
             backend_kind_hash_key(AgentBackendKind::CustomOpenAi),
             "custom_openai"
-        );
-        assert_eq!(
-            backend_kind_hash_key(AgentBackendKind::LmStudio),
-            "lm_studio"
         );
     }
 
@@ -2044,87 +2004,10 @@ data: [DONE]
     }
 
     #[test]
-    fn lm_studio_builtin_defaults_match_local_server() {
-        let backend = AgentBackendConfig::builtin_lm_studio();
-        assert_eq!(backend.id, "lm-studio");
-        assert_eq!(backend.kind, AgentBackendKind::LmStudio);
-        assert!(
-            backend.kind.needs_gateway(),
-            "LM Studio routes through our gateway so we can demote its \
-             HTTP 500 context-overflow responses to 4xx — without that \
-             the Anthropic SDK retries the error with backoff and the \
-             user sees a multi-minute spinner. Inside the gateway we use \
-             the `proxy_anthropic_messages` pass-through (no wire-format \
-             translation) since LM Studio 0.4.1+ speaks Anthropic /v1/messages \
-             natively."
-        );
-        assert!(
-            !backend.kind.is_anthropic_compatible(),
-            "is_anthropic_compatible() means the spawned CLI talks to the \
-             upstream directly with no in-process gateway. LM Studio is \
-             *wire-compatible* with Anthropic but still needs the gateway \
-             for status-code translation."
-        );
-        assert_eq!(
-            backend.base_url.as_deref(),
-            Some("http://localhost:1234"),
-            "URL must match LM Studio's stock `lms server start --port 1234` default"
-        );
-        assert!(backend.model_discovery);
-        assert!(!backend.enabled, "Disabled by default until user opts in");
-    }
-
-    #[test]
-    fn lm_studio_v0_parser_reads_per_model_context_lengths() {
-        // Sample shape from `GET /api/v0/models` on LM Studio 0.4+.
-        let payload = json!({
-            "data": [
-                {
-                    "id": "qwen2.5-coder-7b-instruct",
-                    "type": "llm",
-                    "loaded_context_length": 32_768,
-                    "max_context_length": 131_072,
-                },
-                {
-                    "id": "llama-3.2-3b-instruct",
-                    "type": "llm",
-                    "max_context_length": 8_192,
-                },
-                {
-                    "id": "nomic-embed-text-v1.5",
-                    "type": "embeddings",
-                    "max_context_length": 8_192,
-                },
-            ]
-        });
-        let models = lm_studio_models_from_v0(&payload, 4_096);
-        assert_eq!(models.len(), 2, "embedding entries must be filtered out");
-        assert_eq!(models[0].id, "qwen2.5-coder-7b-instruct");
-        assert_eq!(
-            models[0].context_window_tokens, 32_768,
-            "loaded_context_length wins over max_context_length when both are present"
-        );
-        assert_eq!(models[1].id, "llama-3.2-3b-instruct");
-        assert_eq!(models[1].context_window_tokens, 8_192);
-    }
-
-    #[test]
-    fn lm_studio_v0_parser_falls_back_to_default_context_when_missing() {
-        let payload = json!({
-            "data": [{"id": "model-without-context", "type": "llm"}]
-        });
-        let models = lm_studio_models_from_v0(&payload, 8_192);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].context_window_tokens, 8_192);
-    }
-
-    #[test]
     fn openai_compatible_bearer_token_requires_a_real_secret() {
         // Every gateway backend that reaches `call_openai_responses`
         // (OpenAi, Codex, CustomOpenAi) requires a real API key — the
-        // gateway does not substitute placeholders. LM Studio's
-        // local-first placeholder lives in the LM Studio code path
-        // (which is direct-routed and never enters this helper).
+        // gateway does not substitute placeholders.
         assert_eq!(
             openai_compatible_bearer_token(Some("user-token")).as_deref(),
             Ok("user-token"),
@@ -2148,8 +2031,8 @@ data: [DONE]
 
     #[test]
     fn gateway_upstream_error_unwraps_openai_error_message() {
-        // The exact shape LM Studio returns for context-length overflow.
-        // Body lives inside `error.message`; status is a 4xx so retries stop.
+        // An OpenAI-shaped error body for context-length overflow: the
+        // message lives inside `error.message`; status is a 4xx so retries stop.
         let body = serde_json::json!({
             "error": {
                 "message": "The number of tokens to keep from the initial \
@@ -2266,11 +2149,10 @@ data: [DONE]
 
     #[test]
     fn gateway_upstream_error_promotes_5xx_context_overflow_to_400() {
-        // LM Studio classifies "tokens to keep > context length" as HTTP
-        // 500 (verified empirically against `lms server` 0.4). Without the
-        // message-text demotion, the SDK retries this with exponential
-        // backoff and the user sees a 2-3 minute spinner. With it, the
-        // request fails fast at 400.
+        // Some upstreams classify "tokens to keep > context length" as HTTP
+        // 500. Without the message-text demotion, the SDK retries this with
+        // exponential backoff and the user sees a 2-3 minute spinner. With
+        // it, the request fails fast at 400.
         let body = serde_json::json!({
             "error": {
                 "message": "The number of tokens to keep from the initial \
@@ -2330,7 +2212,7 @@ data: [DONE]
         // 4096-token loaded context, ~12k bytes of JSON ≈ 3000 approx
         // tokens fits comfortably. Bump to 60k bytes ≈ 15k approx tokens
         // and we trip the 90% gate (3686-token ceiling).
-        let mut backend = AgentBackendConfig::builtin_lm_studio();
+        let mut backend = AgentBackendConfig::builtin_openai_api();
         backend.discovered_models = vec![AgentBackendModel {
             id: "qwen3.6-35b-a3b-ud-mlx".to_string(),
             label: "qwen3.6-35b-a3b-ud-mlx".to_string(),
@@ -2361,14 +2243,14 @@ data: [DONE]
             "error must cite the loaded context size, got: {}",
             err.message
         );
-        assert!(err.message.contains("LM Studio"));
+        assert!(err.message.contains(&backend.label));
     }
 
     #[test]
     fn preflight_context_window_check_skips_when_window_unknown() {
         // Manual-only model with no discovered context size → no gate
         // (we don't second-guess the user's manual entry).
-        let mut backend = AgentBackendConfig::builtin_lm_studio();
+        let mut backend = AgentBackendConfig::builtin_openai_api();
         backend.discovered_models.clear();
         backend.manual_models = vec![AgentBackendModel {
             id: "custom-model".to_string(),
@@ -2401,7 +2283,7 @@ data: [DONE]
 
     #[test]
     fn apply_discovered_models_clears_manual_for_ollama_card() {
-        // Auto-detected backends (Ollama, LM Studio, cloud OpenAI, Codex)
+        // Auto-detected backends (Ollama, cloud OpenAI, Codex)
         // replace manual entries on a successful discovery pass so the
         // picker mirrors the server's live model list.
         let mut ollama = AgentBackendConfig::builtin_ollama();

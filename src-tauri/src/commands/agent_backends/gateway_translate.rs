@@ -9,26 +9,18 @@
 //!   but with the Codex-CLI auth material and the SSE-only response
 //!   path that mirrors the ChatGPT subscription flow.
 //!
-//! `proxy_anthropic_messages` is the LM Studio fast-path: LM Studio
-//! 0.4.1+ speaks Anthropic's wire format natively, so we forward bytes
-//! and only fix up upstream HTTP status codes for the SDK's retry
-//! classifier.
-//!
-//! All three converge on `GatewayUpstreamError` so the gateway's HTTP
+//! Both converge on `GatewayUpstreamError` so the gateway's HTTP
 //! handler can write a consistent Anthropic-shape error envelope back
 //! to the Claude CLI via `write_anthropic_error_response`.
 
 use std::collections::HashMap;
 
 use claudette::agent_backend::{AgentBackendConfig, AgentBackendKind};
-use claudette::plugin::load_secure_secret;
-use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::codex_auth::{CODEX_DEFAULT_BASE_URL, CodexAuthMaterial};
-use super::config::{SECRET_BUCKET, backend_models_contain};
+use super::config::backend_models_contain;
 use super::discovery::openai_api_url;
 
 /// Error from a gateway request that needs to be turned back into an HTTP
@@ -229,124 +221,6 @@ pub(super) fn preflight_context_window_check(
             label = config.label,
         ),
     })
-}
-
-/// Forward an Anthropic Messages API request to LM Studio's native
-/// `/v1/messages` endpoint. Bypasses the OpenAI Responses translation
-/// `call_openai_responses` does — LM Studio 0.4.1+ implements Anthropic's
-/// wire format natively, so the only thing we need from the gateway is
-/// **status-code translation**: LM Studio returns HTTP 500 for hard
-/// input errors like context-window overflow, which the Anthropic SDK
-/// retries with backoff. The response body is in Anthropic shape
-/// (`{type: error, error: {type, message}}`) — we just need to fix the
-/// status before forwarding to the CLI.
-///
-/// Successful (2xx) responses are streamed through unchanged so the
-/// agent UI gets per-chunk SSE events as LM Studio produces them
-/// (preserving TTFT). The pass-through writes directly to `out_stream`
-/// rather than buffering into a `Value` like the OpenAI-Responses path.
-pub(super) async fn proxy_anthropic_messages(
-    config: &AgentBackendConfig,
-    anthropic_req: &Value,
-    out_stream: &mut TcpStream,
-) -> Result<(), GatewayUpstreamError> {
-    let base = config
-        .base_url
-        .as_deref()
-        .unwrap_or("http://localhost:1234")
-        .trim_end_matches('/');
-    // LM Studio's `/v1/messages` accepts any bearer locally — but a user
-    // who fronts the server with an authenticating proxy would reject a
-    // missing Authorization header. Always send the placeholder so both
-    // setups work.
-    let bearer = load_secure_secret(SECRET_BUCKET, &config.id)
-        .ok()
-        .flatten()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "lm-studio".to_string());
-    // Pre-flight: same approximation we use for OpenAI-Responses-routed
-    // backends. LM Studio enforces its own context check too, but our
-    // pre-flight wins on UX (~1 ms vs ~40 s round-trip to LM Studio's
-    // tokenizer) and produces a tailored message that names the actual
-    // numbers.
-    let model = anthropic_req
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if !model.is_empty()
-        && let Some(err) = preflight_context_window_check(config, &model, anthropic_req)
-    {
-        return Err(err);
-    }
-
-    let stream_requested = anthropic_req
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let response = reqwest::Client::new()
-        .post(format!("{base}/v1/messages"))
-        .bearer_auth(&bearer)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .json(anthropic_req)
-        .send()
-        .await
-        .map_err(|e| GatewayUpstreamError::internal(format!("LM Studio request failed: {e}")))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.map_err(|e| {
-            GatewayUpstreamError::internal(format!("Invalid LM Studio response body: {e}"))
-        })?;
-        return Err(GatewayUpstreamError::from_upstream(status.as_u16(), &body));
-    }
-
-    // Forward the response. We mirror the upstream Content-Type so the
-    // CLI sees `text/event-stream` for streaming requests and JSON for
-    // non-streaming ones, then close the connection at end-of-body so
-    // we can stream without committing to a Content-Length. Same
-    // `Connection: close` pattern the OpenAI-Responses fallback uses.
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if stream_requested {
-                "text/event-stream".to_string()
-            } else {
-                "application/json".to_string()
-            }
-        });
-    let header_block = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: {content_type}\r\n\
-         Cache-Control: no-cache\r\n\
-         Connection: close\r\n\
-         \r\n"
-    );
-    out_stream
-        .write_all(header_block.as_bytes())
-        .await
-        .map_err(|e| GatewayUpstreamError::internal(format!("write headers failed: {e}")))?;
-
-    let mut body_stream = response.bytes_stream();
-    while let Some(chunk) = body_stream.next().await {
-        let chunk = chunk
-            .map_err(|e| GatewayUpstreamError::internal(format!("upstream stream error: {e}")))?;
-        out_stream
-            .write_all(&chunk)
-            .await
-            .map_err(|e| GatewayUpstreamError::internal(format!("write chunk failed: {e}")))?;
-    }
-    out_stream
-        .flush()
-        .await
-        .map_err(|e| GatewayUpstreamError::internal(format!("flush failed: {e}")))?;
-    Ok(())
 }
 
 /// Format a `GatewayUpstreamError` as the JSON error envelope the

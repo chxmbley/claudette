@@ -34,7 +34,7 @@ pub(super) fn auto_detect_disabled_key(backend_id: &str) -> String {
 pub(super) fn backend_supports_auto_detect(backend: &AgentBackendConfig) -> bool {
     matches!(
         backend.kind,
-        AgentBackendKind::Ollama | AgentBackendKind::CodexNative | AgentBackendKind::LmStudio
+        AgentBackendKind::Ollama | AgentBackendKind::CodexNative
     )
 }
 
