@@ -1,6 +1,6 @@
 //! Startup auto-detect probation + opt-out: the helpers that decide
 //! which built-in backends should flip themselves on at launch when
-//! their dependencies appear (Codex CLI, Ollama, LM Studio), and the
+//! their dependencies appear (Codex CLI, Ollama), and the
 //! per-backend opt-out persistence that keeps a deliberately-disabled
 //! card disabled.
 

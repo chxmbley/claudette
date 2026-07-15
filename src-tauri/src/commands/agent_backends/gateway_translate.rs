@@ -25,9 +25,9 @@ use super::discovery::openai_api_url;
 
 /// Error from a gateway request that needs to be turned back into an HTTP
 /// response for the Claude CLI. Carries both the upstream-extracted message
-/// and the response status we want the gateway to emit — so a 4xx from LM
-/// Studio (e.g. context-length exceeded) propagates as 4xx and the SDK does
-/// not retry it as a transient 5xx.
+/// and the response status we want the gateway to emit — so a 4xx from a
+/// gateway-routed backend (e.g. context-length exceeded) propagates as 4xx
+/// and the SDK does not retry it as a transient 5xx.
 #[derive(Debug, Clone)]
 pub(super) struct GatewayUpstreamError {
     pub(super) status: u16,
@@ -69,9 +69,10 @@ impl GatewayUpstreamError {
                 }
             });
         // 4xx → forward as-is so retries stop. 5xx that are *semantically*
-        // permanent (LM Studio classifies "tokens to keep > context length"
-        // as HTTP 500 even though it's a hard input error) get demoted to
-        // 400 so the Anthropic SDK does not retry them with backoff.
+        // permanent (some OpenAI-compatible servers classify "tokens to keep
+        // > context length" as HTTP 500 even though it's a hard input error)
+        // get demoted to 400 so the Anthropic SDK does not retry them with
+        // backoff.
         // Anything else collapses to 502 (bad gateway) for the SDK consumer.
         let outbound = if (400..500).contains(&status) {
             status
@@ -131,7 +132,7 @@ pub(super) fn truncate_for_error_message(body: &str) -> String {
 /// Returns true when the upstream message describes a hard input error that
 /// will fail identically on retry — context-window overflow, model not
 /// loaded, model not found, etc. Matched case-insensitively against
-/// substrings observed in the wild from LM Studio, llama.cpp, vLLM, and
+/// substrings observed in the wild from llama.cpp, vLLM, and other
 /// OpenAI-compatible gateways. Keep the list narrow: false positives mean
 /// users miss out on transient-failure retries.
 pub(super) fn upstream_message_is_permanent_failure(message: &str) -> bool {
@@ -165,11 +166,8 @@ impl From<String> for GatewayUpstreamError {
 
 // Gateway backends that go through the OpenAI-Responses translation
 // path (OpenAi, Codex, CustomOpenAi) require a real API key — they
-// hit api.openai.com or chatgpt.com and need real auth. LM Studio is
-// also gateway-routed but takes the Anthropic-shape pass-through in
-// `proxy_anthropic_messages` instead of this helper, and its
-// local-first placeholder-bearer logic lives there + in
-// `discover_lm_studio_models` (where it's actually exercised).
+// hit api.openai.com or chatgpt.com and need real auth, so a missing
+// secret is a hard error here.
 pub(super) fn openai_compatible_bearer_token(secret: Option<&str>) -> Result<String, String> {
     secret
         .map(str::to_string)
@@ -226,7 +224,7 @@ pub(super) fn preflight_context_window_check(
 /// Format a `GatewayUpstreamError` as the JSON error envelope the
 /// Anthropic CLI / SDK expect, picking the most accurate `error.type`
 /// for the outbound HTTP status. Centralized so every gateway code path
-/// (OpenAI-Responses translation, LM Studio pass-through) produces an
+/// (OpenAI-Responses and Codex translation) produces an
 /// identical shape.
 pub(super) async fn write_anthropic_error_response(
     stream: &mut TcpStream,
@@ -266,10 +264,11 @@ pub(super) async fn call_openai_responses(
         "max_output_tokens": anthropic_req.get("max_tokens").cloned().unwrap_or(json!(4096)),
     });
     // Pre-flight: when the backend reports a per-model context window
-    // (LM Studio's `loaded_context_length`, OpenAI's `context_window_tokens`)
-    // and the serialized request obviously won't fit, fail fast with a
-    // user-actionable message instead of waiting ~40s for LM Studio to
-    // tokenize the prompt and reject it as HTTP 500.
+    // (a local server's `loaded_context_length`, OpenAI's
+    // `context_window_tokens`) and the serialized request obviously won't
+    // fit, fail fast with a user-actionable message instead of waiting
+    // ~40s for the upstream server to tokenize the prompt and reject it
+    // as HTTP 500.
     if let Some(err) = preflight_context_window_check(config, &model, &openai_req) {
         return Err(err);
     }
@@ -282,9 +281,10 @@ pub(super) async fn call_openai_responses(
         .await
         .map_err(|e| GatewayUpstreamError::internal(format!("OpenAI request failed: {e}")))?;
     let status = response.status();
-    // Read the body unconditionally — on error this is where LM Studio
-    // returns the "load with larger context" message that we want to
-    // surface verbatim instead of swallowing via error_for_status().
+    // Read the body unconditionally — on error this is where an
+    // OpenAI-compatible server returns the "load with larger context"
+    // message that we want to surface verbatim instead of swallowing via
+    // error_for_status().
     let body = response
         .text()
         .await

@@ -7,7 +7,7 @@ import type {
  * What the composer's usage indicator should do for the active session.
  *
  *  - `"active"`   — render the live meter (Codex Native, OpenAI/OpenRouter/
- *                   Pi/Ollama/LM Studio, or a Claude-family backend when the
+ *                   Ollama, or a Claude-family backend when the
  *                   experimental Claude Code Usage flag is on).
  *  - `"disabled"` — render the greyed-out battery; click opens Settings →
  *                   Experimental → Claude Code Usage. Used when the active
@@ -29,7 +29,7 @@ export type UsageIndicatorMode = "active" | "disabled" | "hidden";
  * credential ecosystem — and the Anthropic Usage API can never speak
  * for it, so it does NOT belong here even though its default harness
  * is `claude_code`. Same reasoning extends to OpenAI / Custom OpenAI /
- * Ollama / LM Studio: gateway-translated, not OAuth-authenticated.
+ * Ollama: gateway-translated, not OAuth-authenticated.
  *
  * `custom_anthropic` stays in for backward compatibility — pre-refactor
  * builds always showed the global Anthropic Usage meter regardless of

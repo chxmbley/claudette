@@ -1,6 +1,7 @@
 //! BackendGateway: a tiny TCP/HTTP server we spin up per-backend so
 //! the Anthropic-shape Claude CLI subprocess can talk to a non-Anthropic
-//! upstream (cloud OpenAI, Codex subscription, LM Studio, etc.) without
+//! upstream (cloud OpenAI, Codex subscription, a local OpenAI-compatible
+//! server, etc.) without
 //! knowing the difference. Each gateway is keyed on
 //! (backend, secret, model) — change any one and we tear down the old
 //! listener and spawn a fresh one with new auth + a new bearer token.

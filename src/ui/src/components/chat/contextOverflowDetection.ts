@@ -24,9 +24,9 @@
  *   - Anthropic: "Input is too long for requested model"
  *   - OpenAI:   "This model's maximum context length is 8192 tokens"
  *               "Your prompt is X tokens, exceeds the maximum"
- *   - LM Studio: "Trying to keep N tokens to keep, but the context window is M"
+ *   - Local server: "Trying to keep N tokens to keep, but the context window is M"
  *   - Codex:    "Context window exceeded"
- *   - Pi (varied, passes through provider text):
+ *   - Other OpenAI-compatible servers (varied, pass through provider text):
  *               "prompt is too long",
  *               "context length", etc.
  */

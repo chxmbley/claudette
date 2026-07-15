@@ -23,7 +23,7 @@ describe("isContextWindowError", () => {
     ).toBe(true);
   });
 
-  it("matches LM Studio's 'tokens to keep' phrasing", () => {
+  it("matches a local backend's 'tokens to keep' phrasing", () => {
     expect(
       isContextWindowError(
         "Trying to keep 8000 tokens to keep, but the context window is only 4096",
@@ -35,7 +35,7 @@ describe("isContextWindowError", () => {
     expect(isContextWindowError("Error: context window exceeded")).toBe(true);
   });
 
-  it("matches Pi-sidecar passthrough variants", () => {
+  it("matches OpenAI-compatible passthrough variants", () => {
     expect(isContextWindowError("prompt is too long")).toBe(true);
     expect(isContextWindowError("context length is too small for this conversation")).toBe(
       true,

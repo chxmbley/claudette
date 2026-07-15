@@ -32,7 +32,7 @@ export interface ClaudeCodeUsage {
 // One snapshot per chat session, with the data source chosen by backend kind:
 //  - Anthropic family (with experimental flag on) → OAuth subscription buckets
 //  - Anthropic family (flag off)                 → empty stub, `experimental_disabled = true`
-//  - Codex Native / OpenAI / OpenRouter / Pi / Ollama / LM Studio → local-aggregate
+//  - Codex Native / OpenAI / OpenRouter / Ollama → local-aggregate
 //    of `chat_messages` rows, plus provider-specific extras (Codex plan label,
 //    OpenRouter credit balance).
 // -----------------------------------------------------------------------------

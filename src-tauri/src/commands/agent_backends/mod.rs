@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn save_after_tolerant_load_round_trips_unknown_entry() {
         // Regression guard: a downgrade-then-upgrade cycle must not lose
-        // the user's LM-Studio-style config. After an older build does a
+        // a removed-backend config row. After an older build does a
         // tolerant load and then saves edits, the unknown entry must
         // still be present in SQLite for the newer build to pick up.
         let db = Database::open_in_memory().expect("test db should open");

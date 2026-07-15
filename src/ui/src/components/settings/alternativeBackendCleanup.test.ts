@@ -32,7 +32,7 @@ describe("planAlternativeBackendDisableCleanup", () => {
       sessionModels: [["model:sess-1", "qwen3-coder"]],
       sessionProviders: [["model_provider:sess-1", "ollama"]],
       selectedModels: { "sess-2": "qwen2.5-coder-7b-instruct" },
-      selectedProviders: { "sess-2": "lm-studio" },
+      selectedProviders: { "sess-2": "openai-api" },
     });
 
     expect(plan.defaultModel).toBe("sonnet");
@@ -80,15 +80,15 @@ describe("isAlternativeBackendSelection", () => {
     expect(isAlternativeBackendSelection("future-gpt", "anthropic")).toBe(true);
   });
 
-  it("treats lm-studio sessions as alternative so the cleanup walker resets them", () => {
-    expect(isAlternativeBackendSelection("qwen2.5-coder-7b-instruct", "lm-studio")).toBe(true);
+  it("treats openai-api sessions as alternative so the cleanup walker resets them", () => {
+    expect(isAlternativeBackendSelection("qwen2.5-coder-7b-instruct", "openai-api")).toBe(true);
 
     // And the planner picks them up alongside Ollama sessions.
     const plan = planAlternativeBackendDisableCleanup({
       defaultModel: "opus",
       defaultBackend: "anthropic",
       sessionModels: [["model:sess-1", "qwen2.5-coder-7b-instruct"]],
-      sessionProviders: [["model_provider:sess-1", "lm-studio"]],
+      sessionProviders: [["model_provider:sess-1", "openai-api"]],
       selectedModels: {},
       selectedProviders: {},
     });

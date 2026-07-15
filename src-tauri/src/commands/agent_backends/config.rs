@@ -77,7 +77,7 @@ pub(super) fn backend_models_contain(backend: &AgentBackendConfig, model: &str) 
 /// list — used to decide whether a chat-send re-discovery actually changed
 /// anything worth persisting. Matches the freshness signal in
 /// `runtime_hash` (id + context_window_tokens) so a context-slider change
-/// in LM Studio reliably triggers both a DB write and a gateway respawn.
+/// on a local server reliably triggers both a DB write and a gateway respawn.
 ///
 /// Sorted by model id so the same set of models in a different upstream
 /// order produces the same signature — otherwise a single discovery call
@@ -488,7 +488,7 @@ pub(super) fn runtime_hash(
     model.hash(&mut hasher);
     secret.unwrap_or("").hash(&mut hasher);
     // Fingerprint the per-model context windows so a fresh discovery that
-    // bumps `loaded_context_length` (LM Studio reload with a new slider)
+    // bumps `loaded_context_length` (a local-server reload with a new slider)
     // forces the gateway to respawn with the new snapshot. Without this
     // the gateway's pre-flight check would keep using the stale context
     // size baked into the running task. id+context is enough — label and

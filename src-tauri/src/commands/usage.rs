@@ -41,7 +41,7 @@ pub async fn get_session_usage(
     // stub so the frontend renders the indicator in greyed mode without
     // leaking any per-session token data the user hasn't asked for.
     //
-    // OpenAI / Custom OpenAI / Ollama / LM Studio also default to the
+    // OpenAI / Custom OpenAI / Ollama also default to the
     // `claude_code` harness for gateway translation, but they go to the
     // local-aggregate branch below — the meter shows tokens recorded
     // by Claudette, not Anthropic OAuth quotas, so no gate applies.

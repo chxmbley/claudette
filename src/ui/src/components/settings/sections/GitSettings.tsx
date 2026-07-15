@@ -55,7 +55,7 @@ export function GitSettings() {
     (s) => s.setProjectViewIssuesPrsEnabled,
   );
   // Use the gated registry hook so the CI auto-fix model picker
-  // applies the same `codexEnabled` / Pi-SDK / Claude-OAuth filters as
+  // applies the same `codexEnabled` / Claude-OAuth filters as
   // every other chat-side model selector. Saving a model the Rust
   // resolver later rejects would leave auto-fix sessions silently
   // failing at send time.

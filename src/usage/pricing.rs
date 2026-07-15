@@ -2,7 +2,7 @@
 //!
 //! Used by [`local_aggregate`](super::local_aggregate) when the
 //! `chat_messages.cost_usd` column wasn't populated by the harness
-//! (Claude Code populates it; the Codex / Pi harnesses don't yet).
+//! (Claude Code populates it; the Codex harness doesn't yet).
 //! Costs are best-effort — the lookup falls back to `None` for unknown
 //! model ids and the snapshot drops the dollar figure rather than
 //! showing a misleading one.
