@@ -119,10 +119,8 @@ jobs:
             bundles: app,dmg
             label: macos-x86_64
           # `appimage` is omitted on Linux; `.deb` is the Linux nightly
-          # artifact. The original blocker (linuxdeploy segfaulting on the
-          # Bun-compiled Pi harness sidecar, issue #825) is gone now that
-          # the Pi sidecar has been removed, so re-enabling `appimage` here
-          # is unblocked — but that's a separate release-artifact decision.
+          # artifact. Re-enabling `appimage` here (issue #825) is a separate
+          # release-artifact decision.
           - platform: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
             bundles: deb

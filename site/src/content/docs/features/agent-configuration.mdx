@@ -31,10 +31,8 @@ Set the default model for new sessions in `Settings > Models > Default model`.
 
 You can change the model on an active chat at any time — from the toolbar dropdown or with the `/model` slash command. Whether the conversation continues depends on whether the swap stays inside the same runtime:
 
-- **Same runtime (no context loss)** — Switching between models that resolve to the same harness keeps the full transcript. The very next turn streams from the new model with every prior message available. This covers the common cases: Sonnet 5 ↔ Opus 4.8 on the Anthropic Claude Code path, two Pi-routed Ollama models on the same Pi card, and so on. Claudette tears down the persistent agent subprocess and respawns it with the new `--model` flag while reusing the existing session id, so the new turn resumes the prior transcript.
-- **Different runtime (context migrated as a prelude)** — Switching to a model whose backend uses a different runtime — e.g., Anthropic Claude Code to Codex Native, or anything to a Pi SDK target — preserves the conversation by injecting the prior history into the new harness's very first turn. Claudette reads every persisted message on the session, wraps it in a `<conversation-history>` block, and prepends that block to the user's next message before sending it to the new harness. The persisted chat history in the UI is unchanged; the prelude is only visible to the model on the next turn. Tool calls in the history are rendered as text — the new harness reads them for context but does not re-execute them. The first turn after a cross-runtime switch will be slower and use more input tokens than usual because the whole prior conversation is part of its input.
-
-You can see which runtime a model uses from the "via …" badge next to its row in the model picker. Models on a runtime that matches the picker section's default carry no badge (e.g., Pi-card models on the Pi runtime, Anthropic Claude Code models on the Claude CLI runtime).
+- **Same runtime (no context loss)** — Switching between models that resolve to the same harness keeps the full transcript. The very next turn streams from the new model with every prior message available. This covers the common cases: Sonnet 5 ↔ Opus 4.8 on the Anthropic Claude Code path, two Ollama models on the same Ollama card, and so on. Claudette tears down the persistent agent subprocess and respawns it with the new `--model` flag while reusing the existing session id, so the new turn resumes the prior transcript.
+- **Different runtime (context migrated as a prelude)** — Switching to a model whose backend uses a different runtime — e.g., Anthropic Claude Code to Codex Native — preserves the conversation by injecting the prior history into the new harness's very first turn. Claudette reads every persisted message on the session, wraps it in a `<conversation-history>` block, and prepends that block to the user's next message before sending it to the new harness. The persisted chat history in the UI is unchanged; the prelude is only visible to the model on the next turn. Tool calls in the history are rendered as text — the new harness reads them for context but does not re-execute them. The first turn after a cross-runtime switch will be slower and use more input tokens than usual because the whole prior conversation is part of its input.
 
 ### When the model's context window is too small
 
@@ -143,12 +141,12 @@ The turn banner in the chat timeline shows the model, effort level, and any non-
 
 ## Agent Providers
 
-Claudette can run agents against additional providers — [Ollama](/claudette/features/providers/ollama/) (local, Anthropic-wire), [LM Studio](/claudette/features/providers/lm-studio/) (local, Anthropic-wire via `/v1/messages`), [OpenAI](/claudette/features/providers/openai-codex/#openai-api) (remote, gateway-translated), [Codex](/claudette/features/providers/openai-codex/#codex), or [Pi](/claudette/features/providers/pi/) (SDK sidecar harness) — instead of the official `claude` CLI. These providers are configured in **Settings > Models**; Codex, Ollama, LM Studio, and Pi are auto-detected and their model lists refreshed on startup when available, unless you manually turn them off.
+Claudette can run agents against additional providers — [Ollama](/claudette/features/providers/ollama/) (local, Anthropic-wire), [OpenAI](/claudette/features/providers/openai-codex/#openai-api) (remote, gateway-translated), or [Codex](/claudette/features/providers/openai-codex/#codex) — instead of the official `claude` CLI. These providers are configured in **Settings > Models**; Codex and Ollama are auto-detected and their model lists refreshed on startup when available, unless you manually turn them off.
 
 Several chat-header toggles on this page only apply to certain providers. The capability matrix in the dedicated section shows the full picture, but the highlights:
 
 - **1M-context auto-upgrade** — Anthropic only.
-- **Effort** — Anthropic, Codex, and Pi.
+- **Effort** — Anthropic and Codex.
 - **Fast mode** — Anthropic and Codex.
 - **Extended thinking** — Anthropic and Ollama (when the model supports it).
 - **Unsupported toggles** — hidden on providers that do not advertise the matching capability. Local models and gateway OpenAI implement these knobs inconsistently or not at all, so the chat header hides them rather than silently ignoring user intent.
