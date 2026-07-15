@@ -15,7 +15,6 @@ import { ConfirmNightlyChannelModal } from "./ConfirmNightlyChannelModal";
 import { MissingCliModal } from "./MissingCliModal";
 import { KeyboardShortcutsModal } from "./KeyboardShortcutsModal";
 import { EnvTrustModal } from "./EnvTrustModal";
-import { PiLoginModalRoute } from "./PiLoginModalRoute";
 import { RequiredInputsModal } from "./RequiredInputsModal";
 
 export function ModalRouter() {
@@ -54,8 +53,6 @@ export function ModalRouter() {
       return <KeyboardShortcutsModal />;
     case "envTrust":
       return <EnvTrustModal />;
-    case "piLogin":
-      return <PiLoginModalRoute />;
     case "requiredInputs":
       return <RequiredInputsModal />;
     default:

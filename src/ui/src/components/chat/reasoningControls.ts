@@ -3,7 +3,7 @@ import {
   isXhighEffortAllowed,
 } from "./modelCapabilities";
 
-export type ReasoningControlVariant = "claude" | "codex" | "pi";
+export type ReasoningControlVariant = "claude" | "codex";
 
 export type ReasoningLevel = {
   id: string;
@@ -34,7 +34,6 @@ export const CODEX_REASONING_LEVELS: readonly ReasoningLevel[] = [
 export function reasoningVariantForModel(
   model: ReasoningModelLike | undefined,
 ): ReasoningControlVariant {
-  if (model?.providerKind === "pi_sdk" || model?.providerId === "pi") return "pi";
   return model?.providerKind === "codex_native" ||
     model?.providerId === "codex" ||
     model?.providerId === "experimental-codex"
@@ -46,7 +45,7 @@ export function getReasoningLevels(
   model: string,
   variant: ReasoningControlVariant,
 ): readonly ReasoningLevel[] {
-  if (variant === "codex" || variant === "pi") return CODEX_REASONING_LEVELS;
+  if (variant === "codex") return CODEX_REASONING_LEVELS;
   if (isXhighEffortAllowed(model)) return CLAUDE_EFFORT_LEVELS;
   if (isMaxEffortAllowed(model)) {
     return CLAUDE_EFFORT_LEVELS.filter((level) => level.id !== "xhigh");
@@ -62,7 +61,7 @@ export function normalizeReasoningLevel(
   variant: ReasoningControlVariant,
 ): string {
   const value = level?.trim() || (variant === "claude" ? "auto" : "high");
-  if ((variant === "codex" || variant === "pi") && (value === "auto" || value === "default")) {
+  if (variant === "codex" && (value === "auto" || value === "default")) {
     return "high";
   }
   if (getReasoningLevels(model, variant).some((candidate) => candidate.id === value)) {
@@ -70,7 +69,7 @@ export function normalizeReasoningLevel(
   }
   if (value === "max") return "high";
   if (value === "xhigh") return "high";
-  if (variant === "codex" || variant === "pi") return "high";
+  if (variant === "codex") return "high";
   return "auto";
 }
 

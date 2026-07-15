@@ -31,20 +31,4 @@ describe("reasoningControls", () => {
     expect(normalizeReasoningLevel("minimal", "sonnet", "claude")).toBe("auto");
   });
 
-  it("uses Pi-compatible effort levels without Codex labeling", () => {
-    const variant = reasoningVariantForModel({
-      providerId: "pi",
-      providerKind: "pi_sdk",
-    });
-
-    expect(variant).toBe("pi");
-    expect(getReasoningLevels("openai/gpt-5.4", variant).map((level) => level.id)).toEqual([
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-    ]);
-    expect(normalizeReasoningLevel("auto", "openai/gpt-5.4", variant)).toBe("high");
-    expect(normalizeReasoningLevel("max", "openai/gpt-5.4", variant)).toBe("high");
-  });
 });

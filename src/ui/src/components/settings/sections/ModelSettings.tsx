@@ -26,7 +26,6 @@ import { useAppStore } from "../../../stores/useAppStore";
 import { formatBackendError } from "../backendSettingsErrors";
 import { planAlternativeBackendDisableCleanup } from "../alternativeBackendCleanup";
 import { SearchableSelect } from "../SearchableSelect";
-import { RuntimeSelector } from "../RuntimeSelector";
 import {
   LEGACY_CODEX_BACKEND,
   LEGACY_NATIVE_CODEX_BACKEND,
@@ -36,7 +35,6 @@ import {
 } from "../codexBackendMigration";
 import { shouldShowBackendTestButton } from "../agentBackendStartupRefresh";
 import { ClaudeCodeAuthSetting } from "../../auth/ClaudeCodeAuthSetting";
-import { PiCardBody } from "../PiCardBody";
 import styles from "../Settings.module.css";
 
 const BACKEND_AUTO_DETECT_DISABLED_PREFIX = "agent_backend_auto_detect_disabled:";
@@ -64,14 +62,13 @@ export function ModelSettings() {
   const [defaultShowThinking, setDefaultShowThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Tolerant-loader diagnostics: non-fatal warnings emitted when
-  // stored backend entries can't be parsed by this build (e.g. a
-  // newer dev build wrote `lm_studio` and we're an older build).
+  // stored backend entries have a `kind` this build doesn't recognize
+  // (e.g. a removed kind like `pi_sdk` / `lm_studio` left in the DB).
   // Backend keeps the entries as opaque passthrough; user just needs
   // to know they aren't active in this session.
   const [backendWarnings, setBackendWarnings] = useState<string[]>([]);
   const alternativeBackendsEnabled = useAppStore((s) => s.alternativeBackendsEnabled);
   const alternativeBackendsAvailable = useAppStore((s) => s.alternativeBackendsAvailable);
-  const piSdkAvailable = useAppStore((s) => s.piSdkAvailable);
   const setAlternativeBackendsEnabled = useAppStore((s) => s.setAlternativeBackendsEnabled);
   const codexEnabled = useAppStore((s) => s.codexEnabled);
   const setCodexEnabled = useAppStore((s) => s.setCodexEnabled);
@@ -141,20 +138,16 @@ export function ModelSettings() {
   };
 
   // `useModelRegistry` keeps the default-model dropdown aligned with
-  // every other selector — feature flags + OAuth Pi-anthropic gate.
+  // every other selector — feature flags applied.
   const registry = useModelRegistry();
   const visibleBackends = useMemo(
     () =>
       agentBackends.filter((backend) => {
         if (backend.id === "anthropic" || backend.kind === "codex_subscription") return false;
         if (backend.kind === "codex_native") return codexEnabled;
-        // Pi card disappears entirely from Settings when the Pi
-        // harness wasn't compiled in. The store's `piSdkAvailable`
-        // mirrors the Rust `pi-sdk` cargo feature via `HostEnvFlags`.
-        if (backend.kind === "pi_sdk") return piSdkAvailable;
         return alternativeBackendsEnabled;
       }),
-    [agentBackends, alternativeBackendsEnabled, codexEnabled, piSdkAvailable],
+    [agentBackends, alternativeBackendsEnabled, codexEnabled],
   );
   const anthropicBackend = useMemo(
     () => agentBackends.find((backend) => backend.id === "anthropic") ?? null,
@@ -717,10 +710,9 @@ function BackendCard({
   const manualModelText = manualModels.map((m) => m.id).join(", ");
   const discoveryBackend = isDiscoveryBackend(draft);
   const usesCodexCliAuth = draft.kind === "codex_subscription" || draft.kind === "codex_native";
-  const usesPiAuth = draft.kind === "pi_sdk";
-  const showBaseUrl = !usesCodexCliAuth && !usesPiAuth;
-  const showSecret = !usesCodexCliAuth && !usesPiAuth;
-  const showManualModels = draft.kind === "custom_anthropic" || draft.kind === "custom_openai" || usesPiAuth;
+  const showBaseUrl = !usesCodexCliAuth;
+  const showSecret = !usesCodexCliAuth;
+  const showManualModels = draft.kind === "custom_anthropic" || draft.kind === "custom_openai";
   const showTestButton = shouldShowBackendTestButton(draft);
   const actualModelCount = countBackendModels(draft);
   const displayModelCount = actualModelCount > 0 ? actualModelCount : statusModelCount ?? 0;
@@ -873,18 +865,6 @@ function BackendCard({
           </div>
         )}
         <div className={styles.backendForm}>
-          <RuntimeSelector
-            backend={draft}
-            onSaved={(saved) => {
-              const refreshed = saved.find((item) => item.id === draft.id);
-              if (refreshed) {
-                lastSavedDraftRef.current = JSON.stringify(refreshed);
-                setDraft(refreshed);
-              }
-              onSaved(saved);
-            }}
-            onError={(err) => setCardError(formatBackendError(err, draft))}
-          />
           {showBaseUrl && (
             <label className={styles.backendField}>
               <span className={styles.backendFieldLabel}>{t("models_backend_base_url")}</span>
@@ -935,71 +915,56 @@ function BackendCard({
             </label>
           )}
         </div>
-        {draft.kind === "pi_sdk" ? (
-          // Pi card uses a stacked, full-width layout (not the 3-col
-          // `backendForm` grid) so provider rows have enough space
-          // for label + description + source pill + buttons without
-          // truncating. Discovered models + manual models become
-          // collapsed disclosures below the provider list.
-          <PiCardBody
-            discoveredModels={discoveredModels}
-            manualModelText={manualModelText}
-            onChangeManualModels={updateModels}
-            onProviderConfigured={refresh}
-          />
-        ) : (
-          <div className={styles.backendForm}>
-            {discoveryBackend && (
-              // Same a11y concern: the Pi variant renders expandable
-              // `<button>` headers, which don't belong inside a `<label>`.
-              // Use a `<div>` + labeled span and connect them via aria.
-              <div
-                className={styles.backendField}
-                role="group"
-                aria-labelledby={`${draft.id}-discovered-models-label`}
+        <div className={styles.backendForm}>
+          {discoveryBackend && (
+            // Expandable `<button>` headers don't belong inside a
+            // `<label>`; use a `<div>` + labeled span connected via aria.
+            <div
+              className={styles.backendField}
+              role="group"
+              aria-labelledby={`${draft.id}-discovered-models-label`}
+            >
+              <span
+                id={`${draft.id}-discovered-models-label`}
+                className={styles.backendFieldLabel}
               >
-                <span
-                  id={`${draft.id}-discovered-models-label`}
-                  className={styles.backendFieldLabel}
-                >
-                  {t("models_backend_discovered_models")}
-                </span>
-                <div className={styles.modelChipList}>
-                  {discoveredModels.length > 0 ? (
-                    discoveredModels.map((model) => (
-                      <span key={model.id} className={styles.modelChip}>{model.label || model.id}</span>
-                    ))
-                  ) : (
-                    <span className={styles.modelChipEmpty}>{t("models_backend_no_discovered_models")}</span>
-                  )}
-                </div>
+                {t("models_backend_discovered_models")}
+              </span>
+              <div className={styles.modelChipList}>
+                {discoveredModels.length > 0 ? (
+                  discoveredModels.map((model) => (
+                    <span key={model.id} className={styles.modelChip}>{model.label || model.id}</span>
+                  ))
+                ) : (
+                  <span className={styles.modelChipEmpty}>{t("models_backend_no_discovered_models")}</span>
+                )}
               </div>
-            )}
-            {showManualModels && (
-              <label className={styles.backendField}>
-                <span className={styles.backendFieldLabel}>{t("models_backend_manual_models")}</span>
-                <input
-                  className={styles.input}
-                  value={manualModelText}
-                  placeholder={t("models_backend_manual_models_placeholder")}
-                  onChange={(e) => updateModels(e.target.value)}
-                />
-              </label>
-            )}
-            {showSecret && (
-              <label className={styles.backendField}>
-                <span className={styles.backendFieldLabel}>{t("models_backend_secret")}</span>
-                <input
-                  className={styles.input}
-                  type="password"
-                  value={secret}
-                  placeholder={draft.has_secret ? t("models_backend_secret_saved") : t("models_backend_secret")}
-                  onChange={(e) => setSecret(e.target.value)}
-                />
-              </label>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+          {showManualModels && (
+            <label className={styles.backendField}>
+              <span className={styles.backendFieldLabel}>{t("models_backend_manual_models")}</span>
+              <input
+                className={styles.input}
+                value={manualModelText}
+                placeholder={t("models_backend_manual_models_placeholder")}
+                onChange={(e) => updateModels(e.target.value)}
+              />
+            </label>
+          )}
+          {showSecret && (
+            <label className={styles.backendField}>
+              <span className={styles.backendFieldLabel}>{t("models_backend_secret")}</span>
+              <input
+                className={styles.input}
+                type="password"
+                value={secret}
+                placeholder={draft.has_secret ? t("models_backend_secret_saved") : t("models_backend_secret")}
+                onChange={(e) => setSecret(e.target.value)}
+              />
+            </label>
+          )}
+        </div>
       </div>
       <div className={styles.settingControl}>
         <div className={styles.backendActions}>
@@ -1024,13 +989,6 @@ function BackendCard({
               {t("models_backend_login")}
             </button>
           )}
-          {/* Pi auth UX moved into the inline `PiProviderManager`
-              above — see the `draft.kind === "pi_sdk"` block at the
-              top of `.backendForm`. Per-provider login lives there
-              (Configure / Sign in buttons), and the redundant card-
-              footer button used to confuse users into thinking
-              there's a single "Pi login" instead of N per-provider
-              flows. */}
         </div>
       </div>
     </div>
@@ -1060,13 +1018,6 @@ function isDiscoveryBackend(backend: AgentBackendConfig) {
     backend.model_discovery ||
     backend.kind === "ollama" ||
     backend.kind === "openai_api" ||
-    backend.kind === "codex_native" ||
-    backend.kind === "pi_sdk" ||
-    backend.kind === "lm_studio"
+    backend.kind === "codex_native"
   );
 }
-
-// `PiDiscoveredModelsList` removed — the Pi card's discovered-models
-// view now lives inside `PiCardBody`'s "Available models" disclosure.
-// `groupPiDiscoveredModels` is still used by the chat-side model
-// picker registry (`modelRegistry.ts`) and by `PiCardBody`.

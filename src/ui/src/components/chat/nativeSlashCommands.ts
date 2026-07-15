@@ -43,11 +43,6 @@ export interface NativeCommandContext {
   addLocalMessage: (text: string) => void;
   startClaudeAuthLogin: () => Promise<void>;
   startCodexLogin: () => Promise<void>;
-  /** Open the Pi provider picker modal (multi-provider — Pi has no
-   *  single OAuth flow like Codex/Claude). Caller resolves once the
-   *  modal is mounted; the modal closes on its own when the user
-   *  finishes or cancels. */
-  startPiLogin: () => Promise<void>;
   openUsageSettingsExternal: () => void;
   openReleaseNotes: () => void;
 
@@ -364,8 +359,7 @@ function formatCommandError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function loginTargetForProvider(providerId: string): "claude" | "codex" | "pi" {
-  if (providerId === "pi") return "pi";
+function loginTargetForProvider(providerId: string): "claude" | "codex" {
   return providerId === "codex" ||
     providerId === "experimental-codex" ||
     providerId === "codex-subscription"
@@ -389,11 +383,6 @@ const loginHandler: NativeHandler = {
         await ctx.startCodexLogin();
         ctx.addLocalMessage(
           "Codex sign-in opened. Complete the browser flow, then retry the turn.",
-        );
-      } else if (target === "pi") {
-        await ctx.startPiLogin();
-        ctx.addLocalMessage(
-          "Pi sign-in opened. Pick a provider, complete the flow, then retry the turn.",
         );
       } else {
         await ctx.startClaudeAuthLogin();
@@ -575,22 +564,12 @@ const modelHandler: NativeHandler = {
       return handled;
     }
     const { disable1mContext } = useAppStore.getState();
-    const { alternativeBackendsEnabled, codexEnabled, agentBackends, claudeAuthMethod } =
+    const { alternativeBackendsEnabled, codexEnabled, agentBackends } =
       useAppStore.getState();
-    // Match every other registry consumer's OAuth Pi-anthropic gate
-    // (`ensure_anthropic_not_routed_through_pi_via_oauth` in
-    // `agent_backends.rs`). Without this the `/model` command would
-    // happily list `pi/anthropic/...` for OAuth subscribers and the
-    // next send would be refused mid-turn. Non-React context here
-    // (slash command handler), so we compute the flag inline rather
-    // than via the `useModelRegistry` hook.
-    const isClaudeOauthSubscriber =
-      claudeAuthMethod?.toLowerCase() === "oauth_token";
     const registry = buildModelRegistry(
       alternativeBackendsEnabled,
       agentBackends,
       codexEnabled,
-      { isClaudeOauthSubscriber },
     );
     const available = disable1mContext
       ? registry.filter((m) => m.contextWindowTokens < 1_000_000)

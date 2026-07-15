@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { useAppStore } from "./stores/useAppStore";
 import { findPendingPlaceholderForCreatedWorkspace } from "./stores/slices/workspacesSlice";
-import { loadInitialData, getAppSetting, setAppSetting, getHostEnvFlags, listRemoteConnections, listDiscoveredServers, getLocalServerStatus, detectInstalledApps, listSystemFonts, deleteTerminalTab, listAppSettingsWithPrefix, listAgentBackends, autoDetectAgentBackends, refreshAgentBackendModels, bootOk, reportBootStage, getClaudeAuthStatus } from "./services/tauri";
+import { loadInitialData, getAppSetting, setAppSetting, getHostEnvFlags, listRemoteConnections, listDiscoveredServers, getLocalServerStatus, detectInstalledApps, listSystemFonts, deleteTerminalTab, listAppSettingsWithPrefix, listAgentBackends, autoDetectAgentBackends, bootOk, reportBootStage, getClaudeAuthStatus } from "./services/tauri";
 import { applyTheme, applyUserFonts, loadAllThemes, findTheme, cacheThemePreference, getThemeDataAttr } from "./utils/theme";
 import { DEFAULT_THEME_ID, DEFAULT_LIGHT_THEME_ID } from "./styles/themes";
 import type { ThemeDefinition } from "./types/theme";
@@ -93,19 +93,11 @@ function App() {
   const setEditorFontZoom = useAppStore((s) => s.setEditorFontZoom);
   const setDisable1mContext = useAppStore((s) => s.setDisable1mContext);
   const setAlternativeBackendsAvailable = useAppStore((s) => s.setAlternativeBackendsAvailable);
-  const setPiSdkAvailable = useAppStore((s) => s.setPiSdkAvailable);
   const setAlternativeBackendsEnabled = useAppStore((s) => s.setAlternativeBackendsEnabled);
   const setCodexEnabled = useAppStore((s) => s.setCodexEnabled);
   const setAgentBackends = useAppStore((s) => s.setAgentBackends);
   const setDefaultAgentBackendId = useAppStore((s) => s.setDefaultAgentBackendId);
   const setClaudeAuthMethod = useAppStore((s) => s.setClaudeAuthMethod);
-  // Read for the LM Studio polling effect below. We deliberately do
-  // *not* subscribe to `agentBackends` here — the polling tick reads
-  // the live list via `useAppStore.getState()` so we don't tear the
-  // interval down whenever the list updates.
-  const alternativeBackendsEnabled = useAppStore(
-    (s) => s.alternativeBackendsEnabled,
-  );
   const setVoiceToggleHotkey = useAppStore((s) => s.setVoiceToggleHotkey);
   const setVoiceHoldHotkey = useAppStore((s) => s.setVoiceHoldHotkey);
   const setKeybindings = useAppStore((s) => s.setKeybindings);
@@ -419,12 +411,11 @@ function App() {
         const flags =
           flagsResult.status === "fulfilled"
             ? flagsResult.value
-            : { alternative_backends_compiled: false, disable_1m_context: false, pi_sdk_compiled: false };
+            : { alternative_backends_compiled: false, disable_1m_context: false };
         if (flagsResult.status === "rejected") {
           console.error("Failed to load host environment flags:", flagsResult.reason);
         }
         setAlternativeBackendsAvailable(flags.alternative_backends_compiled);
-        setPiSdkAvailable(flags.pi_sdk_compiled);
         if (flags.disable_1m_context) setDisable1mContext(true);
         if (settingResult.status === "rejected") {
           console.error("Failed to load alternative backend setting:", settingResult.reason);
@@ -962,76 +953,7 @@ function App() {
       unlistenMissingCli.then((fn) => fn());
       unlistenMissingWorktree.then((fn) => fn());
     };
-  }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultTerminalAppId, setWorkspaceAppsMenuShown, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId, setThemeMode, setThemeDark, setThemeLight, setUiFontSize, setFontFamilySans, setFontFamilyMono, setSystemFonts, setDetectedApps, setUsageInsightsEnabled, setClaudetteMcpEnabled, setProjectViewIssuesPrsEnabled, setClaudetteTerminalEnabled, setShowSidebarRunningCommands, setToolDisplayMode, setExtendedToolCallOutput, setAlternativeBackendsAvailable, setPiSdkAvailable, setAlternativeBackendsEnabled, setCodexEnabled, setAgentBackends, setDefaultAgentBackendId, setClaudeAuthMethod, setEditorGitGutterBase, setEditorMinimapEnabled, setRevealActiveFileInTree, setEditorWordWrap, setEditorLineNumbersEnabled, setEditorFontZoom, setDisable1mContext, setAppVersion, setVoiceToggleHotkey, setVoiceHoldHotkey, setKeybindings, setManualWorkspaceOrderByRepo, hydrateWorkspaceScmLinks]);
-
-  // Live freshness for LM Studio's `loaded_context_length`.
-  //
-  // LM Studio is the one backend whose per-model context window can change
-  // at any time — the user drags the Context Length slider in LM Studio's
-  // UI, hits "Reload model", and the same model id now reports a different
-  // loaded context. We need that change reflected in the composer's
-  // capacity indicator and in the gateway pre-flight without making the
-  // user click Settings → Refresh.
-  //
-  // Strategy: while at least one LM Studio backend is enabled, poll
-  // `refreshAgentBackendModels` for each one every 8 s. That command runs
-  // discovery, persists the fresh discovered_models to the DB, and
-  // returns the updated config — which we splice into the Zustand store
-  // so every consumer (model registry, ContextMeter, SegmentedMeter,
-  // ContextPopover, ModelSelector) sees the live value.
-  //
-  // Cost: one localhost GET per LM Studio backend per 8 s. Discovery
-  // round-trip is sub-50 ms in practice. We don't poll OpenAI / Codex —
-  // their context windows are immutable so the initial fetch suffices.
-  //
-  // Important: read the *current* backend list from the Zustand store
-  // inside `tick` (via `useAppStore.getState()`), not from the captured
-  // `agentBackends` snapshot. Putting `agentBackends` in the dep list
-  // would tear the interval down and recreate it on every successful
-  // tick (because each tick calls `setAgentBackends`, which produces a
-  // new array reference) — leading to canceled in-flight requests and
-  // missed refreshes. The effect now only re-runs when the Models-page
-  // backend gate flips.
-  //
-  // Self-scheduling `setTimeout` instead of `setInterval` so the next
-  // tick is only queued *after* the current one resolves. With
-  // `setInterval`, a slow refresh (overloaded LM Studio, multiple
-  // backends, slow disk on the secret-store read) would let multiple
-  // ticks run concurrently, race `setAgentBackends`, and hammer the
-  // backend's `refresh_agent_backend_models` DB writer. The await-then-
-  // schedule pattern makes the period a *floor* (always ≥8 s between
-  // tick starts) rather than a ceiling.
-  useEffect(() => {
-    if (!alternativeBackendsEnabled) return;
-    let cancelled = false;
-    let timer: number | null = null;
-    const tick = async () => {
-      const live = useAppStore.getState().agentBackends;
-      const ids = live
-        .filter((b) => b.kind === "lm_studio" && b.enabled)
-        .map((b) => b.id);
-      for (const id of ids) {
-        if (cancelled) return;
-        try {
-          const refreshed = await refreshAgentBackendModels(id);
-          if (cancelled) return;
-          setAgentBackends(refreshed);
-        } catch {
-          // LM Studio not running, model not loaded, etc. — silent.
-          // The ChatPanel surfaces the friendly "backend unreachable"
-          // banner separately when the user actually tries to send.
-        }
-      }
-      if (!cancelled) {
-        timer = window.setTimeout(tick, 8_000);
-      }
-    };
-    timer = window.setTimeout(tick, 8_000);
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [alternativeBackendsEnabled, setAgentBackends]);
+  }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultTerminalAppId, setWorkspaceAppsMenuShown, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId, setThemeMode, setThemeDark, setThemeLight, setUiFontSize, setFontFamilySans, setFontFamilyMono, setSystemFonts, setDetectedApps, setUsageInsightsEnabled, setClaudetteMcpEnabled, setProjectViewIssuesPrsEnabled, setClaudetteTerminalEnabled, setShowSidebarRunningCommands, setToolDisplayMode, setExtendedToolCallOutput, setAlternativeBackendsAvailable, setAlternativeBackendsEnabled, setCodexEnabled, setAgentBackends, setDefaultAgentBackendId, setClaudeAuthMethod, setEditorGitGutterBase, setEditorMinimapEnabled, setRevealActiveFileInTree, setEditorWordWrap, setEditorLineNumbersEnabled, setEditorFontZoom, setDisable1mContext, setAppVersion, setVoiceToggleHotkey, setVoiceHoldHotkey, setKeybindings, setManualWorkspaceOrderByRepo, hydrateWorkspaceScmLinks]);
 
   // Listen for OS light/dark changes and switch theme when mode is "system".
   useEffect(() => {

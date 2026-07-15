@@ -635,11 +635,6 @@ export function ChatPanel() {
             startCodexLogin: async () => {
               await launchCodexLogin(selectedWorkspaceId);
             },
-            startPiLogin: async () => {
-              useAppStore.getState().openModal("piLogin", {
-                workingDir: ws?.worktree_path ?? "",
-              });
-            },
             openUsageSettingsExternal: () => {
               void openUsageSettings().catch((err) =>
                 console.error("Failed to open usage settings:", err),

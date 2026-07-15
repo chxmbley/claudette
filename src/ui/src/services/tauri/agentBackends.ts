@@ -6,10 +6,8 @@ export type AgentBackendKind =
   | "openai_api"
   | "codex_subscription"
   | "codex_native"
-  | "pi_sdk"
   | "custom_anthropic"
-  | "custom_openai"
-  | "lm_studio";
+  | "custom_openai";
 
 export interface AgentBackendCapabilities {
   thinking: boolean;
@@ -34,12 +32,8 @@ export interface AgentBackendModel {
  *  - `claude_code` — the bundled Claude CLI (with `ANTHROPIC_BASE_URL` /
  *    gateway env when the backend isn't Anthropic itself).
  *  - `codex_app_server` — the Codex CLI's debug app-server.
- *  - `pi_sdk` — Claudette's bundled Pi sidecar.
  */
-export type AgentBackendRuntimeHarness =
-  | "claude_code"
-  | "codex_app_server"
-  | "pi_sdk";
+export type AgentBackendRuntimeHarness = "claude_code" | "codex_app_server";
 
 export interface AgentBackendConfig {
   id: string;
@@ -127,13 +121,6 @@ export function launchCodexLogin(workspaceId?: string | null): Promise<void> {
   return invoke("launch_codex_login", { workspaceId: workspaceId ?? null });
 }
 
-export function setAgentBackendRuntimeHarness(
-  backendId: string,
-  harness: AgentBackendRuntimeHarness | null,
-): Promise<AgentBackendConfig[]> {
-  return invoke("set_agent_backend_runtime_harness", { backendId, harness });
-}
-
 /**
  * Mirror of `AgentBackendKind::default_harness` for the frontend.
  * Keep in lockstep with `src/agent_backend.rs` — a Rust-side test
@@ -148,14 +135,10 @@ export function defaultHarnessForKind(
     case "codex_subscription":
     case "openai_api":
     case "custom_openai":
-      return "claude_code";
     case "ollama":
-    case "lm_studio":
-      return "pi_sdk";
+      return "claude_code";
     case "codex_native":
       return "codex_app_server";
-    case "pi_sdk":
-      return "pi_sdk";
   }
 }
 
@@ -171,17 +154,12 @@ export function availableHarnessesForKind(
     case "anthropic":
     case "custom_anthropic":
     case "codex_subscription":
-      return ["claude_code"];
     case "ollama":
-    case "lm_studio":
-      return ["pi_sdk", "claude_code"];
     case "openai_api":
     case "custom_openai":
-      return ["claude_code", "pi_sdk"];
+      return ["claude_code"];
     case "codex_native":
-      return ["codex_app_server", "pi_sdk"];
-    case "pi_sdk":
-      return ["pi_sdk"];
+      return ["codex_app_server"];
   }
 }
 

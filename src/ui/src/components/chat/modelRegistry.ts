@@ -10,39 +10,21 @@ export type Model = {
   readonly label: string;
   readonly group: string;
   readonly extraUsage: boolean;
-  /** Demoted out of the primary list.
-   *  - Claude Code models: hidden behind the global "More" disclosure.
-   *  - Pi models: hidden behind their sub-section's "Show all (M)…"
-   *    disclosure (the picker checks `providerKind === "pi_sdk"` to
-   *    pick the right scope). */
+  /** Demoted out of the primary list: Claude Code models hidden behind
+   *  the global "More" disclosure. */
   readonly legacy?: boolean;
   readonly providerId?: string;
   readonly providerLabel?: string;
   readonly providerKind?: string;
   readonly providerQualifiedId?: string;
   /** Effective harness the resolver will pick for this model's backend
-   *  at send time. The picker uses this to surface "via Pi" / "via
-   *  Claude CLI" badges on aggregated-backend sections (Ollama, LM
-   *  Studio) so the user can see the dispatch path without opening
-   *  Settings. Not set for Claude Code curated models (which are always
-   *  `claude_code` — use `getHarnessForModel` if you need the resolved
-   *  value with that fallback applied). Populated for every
-   *  backend-injected entry, including the Pi card, so the chat
-   *  model-switch path can detect same- vs cross-harness changes
-   *  uniformly. The redundant-badge suppression for Pi-on-Pi /
-   *  Codex-on-CodexAppServer lives in `ModelSelector`'s
-   *  `runtimeBadge` filter, not here. Possible values:
-   *  `"pi_sdk"`, `"claude_code"`, `"codex_app_server"`. */
+   *  at send time. Not set for Claude Code curated models (which are
+   *  always `claude_code` — use `getHarnessForModel` if you need the
+   *  resolved value with that fallback applied). Populated for every
+   *  backend-injected entry so the chat model-switch path can detect
+   *  same- vs cross-harness changes uniformly. Possible values:
+   *  `"claude_code"`, `"codex_app_server"`. */
   readonly runtimeHarness?: string;
-  /** Display label of the *sub-provider* within a Pi-style aggregator
-   *  backend (e.g. "OpenAI", "Anthropic", "Ollama"). Parsed from the
-   *  `<provider>/<modelId>` id the Pi sidecar emits. Only populated for
-   *  `providerKind === "pi_sdk"`; undefined for every other backend
-   *  (Claude Code curated, Codex, Ollama-via-Claude-CLI, etc.). */
-  readonly subProvider?: string;
-  /** Raw provider key (lowercased) used for stable identity in tests
-   *  and the Anthropic-via-Pi hide. */
-  readonly subProviderKey?: string;
   readonly supportsThinking?: boolean;
   readonly supportsEffort?: boolean;
   readonly supportsFastMode?: boolean;
@@ -139,12 +121,10 @@ export const DEFAULT_HARNESS_BY_KIND: Readonly<Record<string, string>> = {
   anthropic: "claude_code",
   custom_anthropic: "claude_code",
   codex_subscription: "claude_code",
-  ollama: "pi_sdk",
-  lm_studio: "pi_sdk",
+  ollama: "claude_code",
   openai_api: "claude_code",
   custom_openai: "claude_code",
   codex_native: "codex_app_server",
-  pi_sdk: "pi_sdk",
 };
 
 /** Sanctioned harnesses per kind. Mirror of `availableHarnessesForKind`
@@ -155,55 +135,27 @@ export const AVAILABLE_HARNESSES_BY_KIND: Readonly<Record<string, readonly strin
   anthropic: ["claude_code"],
   custom_anthropic: ["claude_code"],
   codex_subscription: ["claude_code"],
-  ollama: ["pi_sdk", "claude_code"],
-  lm_studio: ["pi_sdk", "claude_code"],
-  openai_api: ["claude_code", "pi_sdk"],
-  custom_openai: ["claude_code", "pi_sdk"],
-  codex_native: ["codex_app_server", "pi_sdk"],
-  pi_sdk: ["pi_sdk"],
+  ollama: ["claude_code"],
+  openai_api: ["claude_code"],
+  custom_openai: ["claude_code"],
+  codex_native: ["codex_app_server"],
 };
 
 /**
  * Compute the harness a backend will *actually* resolve to at send
- * time. Mirrors `resolve_dispatch_harness` in
- * `src-tauri/src/commands/agent_backends.rs` — in particular the
- * Pi-disabled downgrade: when the Pi card is off, non-Pi-kind
- * backends that default/override to Pi fall through to their first
- * non-Pi sanctioned harness, otherwise the picker's "via Pi" badge
- * would lie about the dispatch path until the user re-enabled the
- * Pi card.
- *
- * `piEnabled` is the runtime "is the Pi backend reachable?" signal —
- * `false` triggers the downgrade. The Pi card itself short-circuits
- * the check because its own enabled flag is the gate elsewhere
- * (Settings hides the card and `resolve_backend_runtime` rejects
- * disabled backends).
+ * time. Mirrors `AgentBackendConfig::effective_harness` on the Rust
+ * side: the persisted override when it's in the kind's allow-list,
+ * otherwise the kind's default.
  */
 function resolveEffectiveHarness(
   source: BackendRegistrySource,
-  piEnabled: boolean,
 ): string | undefined {
   if (!source.kind) return undefined;
   const allowed = AVAILABLE_HARNESSES_BY_KIND[source.kind];
   const override = source.runtime_harness ?? undefined;
-  const harness =
-    override && allowed?.includes(override)
-      ? override
-      : DEFAULT_HARNESS_BY_KIND[source.kind];
-  if (
-    harness === "pi_sdk"
-    && source.kind !== "pi_sdk"
-    && !piEnabled
-  ) {
-    // First non-Pi entry the kind sanctions — same fallback logic the
-    // Rust resolver uses. `available_harnesses` is ordered with the
-    // kind's preferred default first; we look for the first non-Pi
-    // sanctioned harness so e.g. Codex Native falls through to its
-    // app-server runtime instead of jumping to Claude CLI.
-    const fallback = allowed?.find((h) => h !== "pi_sdk");
-    if (fallback) return fallback;
-  }
-  return harness;
+  return override && allowed?.includes(override)
+    ? override
+    : DEFAULT_HARNESS_BY_KIND[source.kind];
 }
 
 type ParsedModelVersion = {
@@ -220,93 +172,6 @@ type RankedBackendModel = {
 };
 
 const PRIMARY_BACKEND_VERSION_BANDS = 2;
-
-/** Soft cap per Pi sub-provider before models get demoted to the
- *  "Show all (M)…" disclosure. Picked to keep the dropdown readable
- *  without forcing the user to expand a section for the obvious top
- *  choice. The full registry is always reachable via the per-sub-section
- *  search popover. */
-export const PI_SUBSECTION_PRIMARY_CAP = 5;
-
-/** Friendly display labels for Pi's well-known provider keys. Anything
- *  not in this table falls through to `titleCaseProviderKey`, which
- *  capitalizes the first letter and leaves hyphens / dots alone so a
- *  newly-added Pi provider still renders sensibly without a code edit. */
-const PI_PROVIDER_DISPLAY_LABELS: Readonly<Record<string, string>> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-  mistral: "Mistral",
-  qwen: "Qwen",
-  ollama: "Ollama",
-  lmstudio: "LM Studio",
-  moonshot: "MoonshotAI",
-  moonshotai: "MoonshotAI",
-  poolside: "Poolside",
-  arcee: "Arcee AI",
-  reka: "Reka",
-  relace: "Relace",
-  baidu: "Baidu Qianfan",
-  owl: "Owl",
-  router: "Router",
-};
-
-function titleCaseProviderKey(key: string): string {
-  if (!key) return "Other";
-  if (key.length <= 3) return key.toUpperCase();
-  return key.charAt(0).toUpperCase() + key.slice(1);
-}
-
-/** Resolve a Pi provider key (the prefix before `/` in a model id) to
- *  its display label. Returns `{ key: "other", label: "Other" }` for
- *  ids that don't follow the `provider/modelId` shape. */
-export function resolvePiSubProvider(
-  modelId: string,
-): { key: string; label: string } {
-  const slash = modelId.indexOf("/");
-  if (slash <= 0) return { key: "other", label: "Other" };
-  const rawKey = modelId.slice(0, slash).toLowerCase().trim();
-  if (!rawKey) return { key: "other", label: "Other" };
-  const label = PI_PROVIDER_DISPLAY_LABELS[rawKey] ?? titleCaseProviderKey(rawKey);
-  return { key: rawKey, label };
-}
-
-export interface PiDiscoveredGroup<M> {
-  key: string;
-  label: string;
-  models: M[];
-}
-
-/**
- * Group Pi-discovered models by sub-provider (parsed from the
- * `provider/modelId` prefix the sidecar emits). Sub-providers are
- * sorted by model count descending so the biggest catalogs surface
- * first — ties break alphabetically by display label.
- *
- * Pure grouping helper, shared between the Settings card render and
- * its regression tests. Generic over the model shape so the same
- * function works with `BackendRegistryModel`, `AgentBackendModel`,
- * or any other `{ id: string }` payload.
- */
-export function groupPiDiscoveredModels<M extends { id: string }>(
-  models: readonly M[],
-): PiDiscoveredGroup<M>[] {
-  const groups = new Map<string, PiDiscoveredGroup<M>>();
-  for (const model of models) {
-    const { key, label } = resolvePiSubProvider(model.id);
-    let group = groups.get(key);
-    if (!group) {
-      group = { key, label, models: [] };
-      groups.set(key, group);
-    }
-    group.models.push(model);
-  }
-  return Array.from(groups.values()).sort((a, b) => {
-    const sizeDiff = b.models.length - a.models.length;
-    if (sizeDiff !== 0) return sizeDiff;
-    return a.label.localeCompare(b.label);
-  });
-}
 
 function parseModelVersion(model: BackendRegistryModel): ParsedModelVersion | undefined {
   const text = `${model.id} ${model.label}`.toLowerCase();
@@ -388,89 +253,31 @@ export function shouldExposeBackendModels(
   backend: BackendRegistrySource,
   alternativeBackendsEnabled: boolean,
   codexEnabled = false,
-  piSdkAvailable = true,
 ): boolean {
   if (!backend.enabled || backend.id === "anthropic") return false;
   if (backend.kind === "codex_subscription") return false;
   if (backend.kind === "codex_native") return codexEnabled;
-  // Defense in depth: even when a stale Pi backend row makes it into
-  // the store (e.g. a remote-server connection that exposes Pi rows
-  // back to a local no-pi build), the model picker must not surface
-  // them on builds where the Pi harness can't actually dispatch.
-  // The Rust loader normally drops Pi rows in a no-pi build, but the
-  // contract is "hide Pi when not compiled in" — pin it here too.
-  if (backend.kind === "pi_sdk") return piSdkAvailable;
   return alternativeBackendsEnabled;
-}
-
-/**
- * Optional behavior knobs for the model registry. Lives on its own
- * object instead of additional positional arguments so future flags
- * (e.g. a global model-search visibility gate) compose without
- * breaking every call site.
- */
-export interface ModelRegistryOptions {
-  /**
-   * True when the local Claude CLI is signed in with a `oauth_token`
-   * auth method (a Pro / Max subscription). The Rust resolver refuses
-   * to route Pi/`anthropic/*` and Pi/`claude/*` selections in that
-   * mode (`ensure_anthropic_not_routed_through_pi_via_oauth` in
-   * `src-tauri/src/commands/agent_backends.rs`) so we hide those rows
-   * at the registry source rather than only in the chat picker.
-   * Without this filter the Settings default-model dropdown, the
-   * `/model` slash command, and the toolbar selectors would still
-   * surface ids that the resolver rejects mid-send.
-   */
-  isClaudeOauthSubscriber?: boolean;
-  /**
-   * False when the host binary was built without the `pi-sdk` cargo
-   * feature. The Rust loader normally suppresses Pi rows in that case,
-   * but the model registry double-checks here so a remote-server
-   * connection (or any future source that bypasses the loader) can't
-   * leak Pi rows into the no-pi UI. Defaults to `true` so existing
-   * unit-test fixtures keep their full surface without modification.
-   */
-  piSdkAvailable?: boolean;
 }
 
 export function buildModelRegistry(
   alternativeBackendsEnabled: boolean,
   backends: readonly BackendRegistrySource[],
   codexEnabled = false,
-  options: ModelRegistryOptions = {},
 ): readonly Model[] {
-  const isClaudeOauthSubscriber = options.isClaudeOauthSubscriber === true;
-  const piSdkAvailable = options.piSdkAvailable !== false;
-  // Pi-disabled downgrade: when no enabled Pi backend exists, non-Pi
-  // cards that point at the Pi harness fall through to their first
-  // sanctioned non-Pi runtime — same logic as `resolve_dispatch_harness`
-  // in `agent_backends.rs`. Compute once so every per-backend pass
-  // through `resolveEffectiveHarness` reports the dispatch path the
-  // resolver will actually take.
-  const piEnabled = backends.some(
-    (b) => b.kind === "pi_sdk" && b.enabled,
-  );
   let models: Model[] | undefined;
   for (const backend of backends) {
     if (!shouldExposeBackendModels(
       backend,
       alternativeBackendsEnabled,
       codexEnabled,
-      piSdkAvailable,
     )) continue;
     const backendModels =
       backend.discovered_models.length > 0
         ? backend.discovered_models
         : backend.manual_models;
-    const isPi = backend.kind === "pi_sdk";
     const target = models ??= [...MODELS];
-    if (isPi) {
-      collectPiModelsBySubProvider(backend, backendModels, target, {
-        isClaudeOauthSubscriber,
-      });
-      continue;
-    }
-    collectFlatBackendModels(backend, backendModels, target, piEnabled);
+    collectFlatBackendModels(backend, backendModels, target);
   }
   return models ?? MODELS;
 }
@@ -479,14 +286,12 @@ function collectFlatBackendModels(
   backend: BackendRegistrySource,
   backendModels: readonly BackendRegistryModel[],
   target: Model[],
-  piEnabled: boolean,
 ): void {
   const rankedModels = rankBackendModels(backendModels);
   const primaryVersions = primaryVersionKeysByPrefix(rankedModels);
   const seen = new Set<string>();
-  // Compute the effective harness once per backend. The Pi-routing
-  // badge in the picker reads this off any model in the section.
-  const runtimeHarness = resolveEffectiveHarness(backend, piEnabled);
+  // Compute the effective harness once per backend.
+  const runtimeHarness = resolveEffectiveHarness(backend);
   for (const entry of rankedModels) {
     const { model } = entry;
     if (!model.id || seen.has(model.id)) continue;
@@ -512,95 +317,6 @@ function collectFlatBackendModels(
       supportsFastMode: isNativeCodex || backend.capabilities.fast_mode,
       contextWindowTokens: model.context_window_tokens,
     });
-  }
-}
-
-/**
- * Pi's `ModelRegistry.getAvailable()` mixes many real providers (OpenAI,
- * Anthropic, Google, Ollama, …) under one backend. Splitting by the
- * `provider/` prefix in each id lets the picker render scannable
- * sub-sections instead of a 370-row wall. Each sub-section keeps its
- * own version-band ranking so e.g. older GPT versions collapse into
- * "Show all" alongside other openai entries, not alongside Anthropic.
- */
-interface CollectPiModelsOptions {
-  isClaudeOauthSubscriber: boolean;
-}
-
-function collectPiModelsBySubProvider(
-  backend: BackendRegistrySource,
-  backendModels: readonly BackendRegistryModel[],
-  target: Model[],
-  options: CollectPiModelsOptions,
-): void {
-  // Pi card always dispatches via the Pi harness; the Pi-disabled
-  // downgrade in `resolveEffectiveHarness` does not apply when the
-  // source's own kind is `pi_sdk`. Pass `piEnabled=true` explicitly so
-  // the call stays self-evident.
-  const runtimeHarness = resolveEffectiveHarness(backend, /* piEnabled */ true);
-  const bySubProvider = new Map<string, BackendRegistryModel[]>();
-  const subProviderLabels = new Map<string, string>();
-  const subProviderOrder: string[] = [];
-  for (const model of backendModels) {
-    if (!model.id) continue;
-    const { key, label } = resolvePiSubProvider(model.id);
-    // OAuth subscription users can't route Anthropic-or-Claude
-    // models through Pi (the Rust resolver refuses), so strip them
-    // here so they never reach any registry consumer — picker,
-    // Settings default-model dropdown, `/model` slash command, or
-    // the toolbar selectors. Mirrors `pi_model_targets_anthropic`
-    // in `agent_backends.rs`.
-    if (
-      options.isClaudeOauthSubscriber
-      && (key === "anthropic" || key === "claude")
-    ) {
-      continue;
-    }
-    if (!bySubProvider.has(key)) {
-      bySubProvider.set(key, []);
-      subProviderLabels.set(key, label);
-      subProviderOrder.push(key);
-    }
-    bySubProvider.get(key)!.push(model);
-  }
-  for (const subKey of subProviderOrder) {
-    const subLabel = subProviderLabels.get(subKey) ?? "Other";
-    const subModels = bySubProvider.get(subKey) ?? [];
-    const ranked = rankBackendModels(subModels);
-    const primaryVersions = primaryVersionKeysByPrefix(ranked);
-    const seen = new Set<string>();
-    let primaryCountForSub = 0;
-    for (const entry of ranked) {
-      const { model } = entry;
-      if (!model.id || seen.has(model.id)) continue;
-      seen.add(model.id);
-      const versionDemoted = entry.parsed
-        ? !primaryVersions.get(entry.parsed.prefix)?.has(entry.parsed.versionKey)
-        : false;
-      // Per-sub-section cap. A version-demoted entry is already legacy;
-      // anything else past the cap is overflow within its sub-section.
-      const overCap = primaryCountForSub >= PI_SUBSECTION_PRIMARY_CAP;
-      const legacy = versionDemoted || overCap;
-      if (!legacy) primaryCountForSub += 1;
-      target.push({
-        id: model.id,
-        label: model.label || model.id,
-        group: "Pi",
-        extraUsage: false,
-        legacy,
-        providerId: backend.id,
-        providerLabel: "Pi",
-        providerKind: backend.kind,
-        providerQualifiedId: `${backend.id}/${model.id}`,
-        runtimeHarness,
-        subProvider: subLabel,
-        subProviderKey: subKey,
-        supportsThinking: backend.capabilities.thinking,
-        supportsEffort: backend.capabilities.effort,
-        supportsFastMode: backend.capabilities.fast_mode,
-        contextWindowTokens: model.context_window_tokens,
-      });
-    }
   }
 }
 

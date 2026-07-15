@@ -164,34 +164,6 @@ describe("buildModelSubmenuItems", () => {
     expect(items.some((i) => i.type === "separator")).toBe(true);
   });
 
-  it("sections Pi-discovered models by sub-provider, not the flat Pi group", () => {
-    const items = buildModelSubmenuItems(
-      [
-        makeModel({
-          id: "anthropic/claude-sonnet",
-          label: "Claude Sonnet 4.6",
-          group: "Pi",
-          providerKind: "pi_sdk",
-          subProvider: "Anthropic",
-          subProviderKey: "anthropic",
-        }),
-        makeModel({
-          id: "openrouter/minimax",
-          label: "MiniMax-M2.7",
-          group: "Pi",
-          providerKind: "pi_sdk",
-          subProvider: "OpenRouter",
-          subProviderKey: "openrouter",
-        }),
-      ],
-      vi.fn(),
-    );
-    const headers = items
-      .filter((i) => i.type === "header")
-      .map((i) => ("label" in i ? i.label : ""));
-    expect(headers).toEqual(["Anthropic", "OpenRouter"]);
-  });
-
   it("wires onPick to the model that was clicked", async () => {
     const onPick = vi.fn();
     const model = makeModel({ id: "opus", label: "Opus 4.7" });

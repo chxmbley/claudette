@@ -65,9 +65,6 @@ const serviceMocks = vi.hoisted(() => ({
     Promise.resolve({ ok: true, message: "OK", backends: [] }),
   ),
   launchCodexLogin: vi.fn(() => Promise.resolve()),
-  setAgentBackendRuntimeHarness: vi.fn(
-    (_id: string, _harness: unknown) => Promise.resolve([] as AgentBackendConfig[]),
-  ),
   defaultHarnessForKind: (kind: AgentBackendConfig["kind"]) => {
     switch (kind) {
       case "anthropic":
@@ -75,14 +72,10 @@ const serviceMocks = vi.hoisted(() => ({
       case "codex_subscription":
       case "openai_api":
       case "custom_openai":
-        return "claude_code" as const;
       case "ollama":
-      case "lm_studio":
-        return "pi_sdk" as const;
+        return "claude_code" as const;
       case "codex_native":
         return "codex_app_server" as const;
-      case "pi_sdk":
-        return "pi_sdk" as const;
     }
   },
   availableHarnessesForKind: (kind: AgentBackendConfig["kind"]) => {
@@ -90,17 +83,12 @@ const serviceMocks = vi.hoisted(() => ({
       case "anthropic":
       case "custom_anthropic":
       case "codex_subscription":
-        return ["claude_code"] as const;
-      case "ollama":
-      case "lm_studio":
-        return ["pi_sdk", "claude_code"] as const;
       case "openai_api":
       case "custom_openai":
-        return ["claude_code", "pi_sdk"] as const;
+      case "ollama":
+        return ["claude_code"] as const;
       case "codex_native":
-        return ["codex_app_server", "pi_sdk"] as const;
-      case "pi_sdk":
-        return ["pi_sdk"] as const;
+        return ["codex_app_server"] as const;
     }
   },
   effectiveHarness: (backend: AgentBackendConfig) => {
@@ -112,14 +100,10 @@ const serviceMocks = vi.hoisted(() => ({
       case "codex_subscription":
       case "openai_api":
       case "custom_openai":
-        return "claude_code" as const;
       case "ollama":
-      case "lm_studio":
-        return "pi_sdk" as const;
+        return "claude_code" as const;
       case "codex_native":
         return "codex_app_server" as const;
-      case "pi_sdk":
-        return "pi_sdk" as const;
     }
   },
   getClaudeAuthStatus: vi.fn<() => Promise<ClaudeAuthStatus>>(() =>
@@ -157,26 +141,6 @@ vi.mock("../../../stores/useAppStore", () => {
 });
 
 vi.mock("../../../services/tauri", () => serviceMocks);
-
-// Stub the Pi provider-auth Tauri commands so the embedded
-// `PiProviderManager` in the Pi card doesn't error in jsdom (no real
-// Tauri IPC, no harness sidecar). Tests that need to assert on the
-// manager's behavior should override individual mocks rather than
-// adding logic here.
-vi.mock("../../../services/tauri/piProviders", () => ({
-  piListProviders: vi.fn(() =>
-    Promise.resolve({ defaultVisibleCount: 6, providers: [] }),
-  ),
-  piSetProviderApiKey: vi.fn(() => Promise.resolve()),
-  piClearProviderApiKey: vi.fn(() => Promise.resolve()),
-  piOAuthStart: vi.fn(() =>
-    Promise.resolve({ challengeId: "test", providerId: "openrouter" }),
-  ),
-  piOAuthSubmitInput: vi.fn(() => Promise.resolve()),
-  piOAuthCancel: vi.fn(() => Promise.resolve()),
-  listenPiOAuthEvents: vi.fn(() => Promise.resolve(() => {})),
-  PI_OAUTH_EVENT_CHANNEL: "pi://oauth/event",
-}));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn((event: string, callback: (event: { payload: unknown }) => void) => {

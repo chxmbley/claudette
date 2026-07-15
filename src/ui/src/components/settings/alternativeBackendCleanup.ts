@@ -6,12 +6,11 @@ export const DEFAULT_CLAUDE_MODEL = "opus";
 // gate is off. Disabling the gate must not reset defaults or per-session
 // selections that point at any of these, because the user can still see
 // and use them. Anthropic is implicit (`DEFAULT_CLAUDE_BACKEND`); Codex
-// has its own gate; Pi is unconditional and first-class.
+// has its own gate.
 const FIRST_CLASS_BACKENDS_OUTSIDE_GATE = new Set([
   "codex",
   "experimental-codex",
   "codex-subscription",
-  "pi",
 ]);
 
 export type SettingEntry = readonly [string, string];

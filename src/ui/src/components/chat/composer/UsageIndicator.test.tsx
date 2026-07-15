@@ -321,15 +321,15 @@ describe("UsageIndicator", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("passes the selected Pi OpenRouter model to the usage poller", async () => {
-    const pi = makeBackend("pi_sdk", "pi");
-    appStore.agentBackends = [pi];
-    appStore.selectedModelProvider = { s1: "pi" };
+  it("passes the selected OpenRouter model to the usage poller", async () => {
+    const openrouter = makeBackend("custom_openai", "openrouter");
+    appStore.agentBackends = [openrouter];
+    appStore.selectedModelProvider = { s1: "openrouter" };
     appStore.selectedModel = { s1: "openrouter/anthropic/claude-sonnet-4" };
     appStore.sessionUsage = {
       s1: makeSnapshot({
-        provider_kind: "pi_sdk",
-        source_label: "Pi",
+        provider_kind: "custom_openai",
+        source_label: "OpenRouter",
       }),
     };
 
@@ -338,8 +338,8 @@ describe("UsageIndicator", () => {
     expect(pollerMock.useSessionUsagePoller).toHaveBeenCalledWith(
       expect.objectContaining({
         backend: expect.objectContaining({
-          id: "pi",
-          kind: "pi_sdk",
+          id: "openrouter",
+          kind: "custom_openai",
           default_model: "openrouter/anthropic/claude-sonnet-4",
         }),
       }),

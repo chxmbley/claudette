@@ -5,17 +5,11 @@ export function shouldShowBackendTestButton(backend: AgentBackendConfig) {
 }
 
 export function autoDetectableBackendIds(backends: AgentBackendConfig[]) {
-  // Pi is included because the Tauri `auto_detect_agent_backends`
-  // command now probes Pi alongside Codex/Ollama/LM Studio via the
-  // shared model-discovery probe. Without Pi here, a fresh launch
-  // would leave the chat-header model picker showing only the two
-  // seed manual models until the user manually clicked Refresh.
+  // Backends the Tauri `auto_detect_agent_backends` command probes at
+  // startup via the shared model-discovery probe.
   return backends
     .filter((backend) =>
-      backend.kind === "codex_native" ||
-      backend.kind === "ollama" ||
-      backend.kind === "lm_studio" ||
-      backend.kind === "pi_sdk"
+      backend.kind === "codex_native" || backend.kind === "ollama"
     )
     .map((backend) => backend.id);
 }

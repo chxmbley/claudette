@@ -77,8 +77,6 @@ describe("resolveIndicatorMode", () => {
       "openai_api",
       "custom_openai",
       "ollama",
-      "lm_studio",
-      "pi_sdk",
     ];
     for (const kind of alwaysActive) {
       const backend = makeBackend(kind);

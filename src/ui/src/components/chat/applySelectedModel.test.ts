@@ -26,7 +26,6 @@ const appStore = vi.hoisted(() => ({
   alternativeBackendsEnabled: true,
   agentBackends: [] as AgentBackendConfig[],
   codexEnabled: true,
-  piSdkAvailable: true,
   pushToast: vi.fn(),
 }));
 
@@ -85,7 +84,6 @@ function resetState() {
   appStore.alternativeBackendsEnabled = true;
   appStore.agentBackends = [];
   appStore.codexEnabled = true;
-  appStore.piSdkAvailable = true;
   appStore.setSelectedModel.mockClear();
   appStore.setFastMode.mockClear();
   appStore.setEffortLevel.mockClear();
@@ -126,17 +124,17 @@ describe("applySelectedModel", () => {
       );
     });
 
-    it("does NOT call resetAgentSession swapping between Pi-routed sibling models", async () => {
+    it("does NOT call resetAgentSession swapping between Codex-native sibling models", async () => {
       appStore.agentBackends = [
-        backend("pi-sdk", "pi_sdk", [
-          { id: "ollama/llama3", label: "llama3" },
-          { id: "ollama/qwen3", label: "qwen3" },
+        backend("codex-native", "codex_native", [
+          { id: "gpt-5.4", label: "gpt-5.4" },
+          { id: "gpt-5.5", label: "gpt-5.5" },
         ]),
       ];
-      appStore.selectedModel["sess-1"] = "ollama/llama3";
-      appStore.selectedModelProvider["sess-1"] = "pi-sdk";
+      appStore.selectedModel["sess-1"] = "gpt-5.4";
+      appStore.selectedModelProvider["sess-1"] = "codex-native";
 
-      await applySelectedModel("sess-1", "ollama/qwen3", "pi-sdk");
+      await applySelectedModel("sess-1", "gpt-5.5", "codex-native");
 
       expect(serviceMocks.resetAgentSession).not.toHaveBeenCalled();
     });
@@ -169,16 +167,16 @@ describe("applySelectedModel", () => {
       expect(serviceMocks.resetAgentSession).not.toHaveBeenCalled();
     });
 
-    it("prepares cross-harness migration when crossing from Claude Code -> Pi", async () => {
+    it("prepares cross-harness migration when crossing from Claude Code -> Codex app server (single manual model)", async () => {
       appStore.agentBackends = [
-        backend("pi-sdk", "pi_sdk", [
-          { id: "ollama/llama3", label: "llama3" },
+        backend("codex-native", "codex_native", [
+          { id: "gpt-5.5", label: "gpt-5.5" },
         ]),
       ];
       appStore.selectedModel["sess-1"] = "sonnet";
       appStore.selectedModelProvider["sess-1"] = "anthropic";
 
-      await applySelectedModel("sess-1", "ollama/llama3", "pi-sdk");
+      await applySelectedModel("sess-1", "gpt-5.5", "codex-native");
 
       expect(serviceMocks.prepareCrossHarnessMigration).toHaveBeenCalledWith("sess-1");
       expect(serviceMocks.resetAgentSession).not.toHaveBeenCalled();
@@ -196,8 +194,8 @@ describe("applySelectedModel", () => {
       // selection as "assume harness changed" and route through
       // migration so the prelude preserves context defensively.
       appStore.agentBackends = [
-        backend("pi-sdk", "pi_sdk", [
-          { id: "ollama/llama3", label: "llama3" },
+        backend("codex-native", "codex_native", [
+          { id: "gpt-5.5", label: "gpt-5.5" },
         ]),
       ];
       // Prior selection is on a backend NOT in the current registry
@@ -205,7 +203,7 @@ describe("applySelectedModel", () => {
       appStore.selectedModel["sess-1"] = "sonnet";
       appStore.selectedModelProvider["sess-1"] = "anthropic";
 
-      await applySelectedModel("sess-1", "ollama/llama3", "pi-sdk");
+      await applySelectedModel("sess-1", "gpt-5.5", "codex-native");
 
       expect(serviceMocks.prepareCrossHarnessMigration).toHaveBeenCalledWith("sess-1");
       expect(serviceMocks.resetAgentSession).not.toHaveBeenCalled();

@@ -195,18 +195,8 @@ export function buildModelSubmenuItems(
   return items;
 }
 
-/// Compute the section a model belongs to in the submenu. Non-Pi rows
-/// section by their top-level `group` (e.g. "Claude Code", "Codex").
-/// Pi-discovered rows section by `subProvider` so the OpenRouter,
-/// Anthropic, Ollama, etc. sub-catalogs each get their own labeled
-/// block instead of being flattened into one giant "Pi" wall.
+/// Compute the section a model belongs to in the submenu. Rows section
+/// by their top-level `group` (e.g. "Claude Code", "Codex").
 function sectionFor(model: Model): { sectionKey: string; sectionLabel: string } {
-  const isPi = model.providerKind === "pi_sdk";
-  if (isPi && model.subProvider) {
-    return {
-      sectionKey: `pi:${model.subProviderKey ?? model.subProvider.toLowerCase()}`,
-      sectionLabel: model.subProvider,
-    };
-  }
   return { sectionKey: `group:${model.group}`, sectionLabel: model.group };
 }

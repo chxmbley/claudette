@@ -1811,9 +1811,6 @@ pub fn spawn_repo_env_warmup(app: AppHandle, repo_id: String) {
 pub struct HostEnvFlags {
     pub disable_1m_context: bool,
     pub alternative_backends_compiled: bool,
-    /// Retired: the Pi harness has been removed. Always `false`; kept on
-    /// the wire as a compatibility placeholder for older frontends.
-    pub pi_sdk_compiled: bool,
 }
 
 /// Return environment-derived flags from the host process. Unlike app
@@ -1824,7 +1821,6 @@ pub fn get_host_env_flags() -> HostEnvFlags {
     HostEnvFlags {
         disable_1m_context: std::env::var("CLAUDE_CODE_DISABLE_1M_CONTEXT").is_ok(),
         alternative_backends_compiled: cfg!(feature = "alternative-backends"),
-        pi_sdk_compiled: false,
     }
 }
 

@@ -55,8 +55,6 @@ const ALWAYS_ACTIVE_KINDS: ReadonlySet<AgentBackendKind> = new Set([
   "openai_api",
   "custom_openai",
   "ollama",
-  "lm_studio",
-  "pi_sdk",
 ]);
 
 /**
