@@ -276,7 +276,6 @@ impl AgentBackendConfig {
             runtime_harness: None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

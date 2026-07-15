@@ -2306,7 +2306,6 @@ data: [DONE]
         );
     }
 
-
     #[test]
     fn build_codex_app_server_runtime_uses_empty_env() {
         let backend = AgentBackendConfig::builtin_codex_native();
